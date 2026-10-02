@@ -41,6 +41,8 @@ pub struct PadsView {
     feedback_test: bool,
     pub devices: Option<Vec<crate::controllers::DeviceCfg>>,
     pub selected: usize,
+    pub detail_tab: usize,
+    pub ffb_heights: [f32; 2],
     /// Waiting for a button of the shown device to be pressed (to add its binding).
     pub capturing: bool,
     /// A button found through "Add a button", kept visible even past the highlight.
@@ -432,6 +434,76 @@ fn settings_tab(ui: &mut Ui, tab: usize, s: &mut Value, dirty: &mut f32, out: &m
     }
 }
 
+/// The migrated plugin tuning, grouped into two scrollable columns.
+fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg, defaults: core::ffb::Settings, body: Rect, heights: &mut [f32; 2]) -> bool {
+    let mut values = json!({});
+    device.ffb.unwrap_or(defaults).write_json(&mut values);
+    let mut dirty = 0.0;
+    ui.scroll_area(&format!("pad-ffb-{}", device.name), body, &mut |ui, v| {
+        let width = v.w - 10.0;
+        let cols = if width < 900.0 {
+            [Rect::new(v.x, v.y, width, heights[0]), Rect::new(v.x, v.y + heights[0] + GAP, width, heights[1])]
+        } else {
+            let w = (width - GAP) * 0.5;
+            let h = v.h.max(heights[0]).max(heights[1]);
+            [Rect::new(v.x, v.y, w, h), Rect::new(v.x + w + GAP, v.y, w, h)]
+        };
+        *heights = force_feedback_controls(ui, &mut values, &mut dirty, cols);
+        if width < 900.0 { heights[0] + heights[1] + GAP } else { heights[0].max(heights[1]) }
+    });
+    if dirty > 0.0 {
+        device.ffb = Some(core::ffb::Settings::from_json(&values));
+        true
+    } else { false }
+}
+
+fn force_feedback_controls(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) -> [f32; 2] {
+    use core::ffb::{Settings, PARAMETERS, CHOICES, SWITCHES, GROUPS};
+    let mut heights = [0.0; 2];
+    let mut changed = false;
+    for column in 0..2 {
+        let first = column * 4;
+        let mut c = Col::new(ui, cols[column], GROUPS[first]);
+        if column == 0 {
+            ui.label(c.row(), "Use with Telemetry force feedback (Driving).");
+            ui.label(c.row(), "Press Save, then restart a running game.");
+            if ui.button("ffb-preset-reset", c.row(), "Restore plugin tuning", Some("restart_alt"), ButtonKind::Normal) {
+                Settings::default().write_json(s);
+                changed = true;
+            }
+        }
+        for group in first..first + 4 {
+            if group != first { c.section(ui, GROUPS[group]); }
+            for (key, label, _) in SWITCHES.iter().filter(|(_, _, g)| *g == group) {
+                let old = get(s, key).clone();
+                toggle_setting(ui, s, dirty, c.row(), label, key);
+                changed |= old != *get(s, key);
+            }
+            for choice in CHOICES.iter().filter(|p| p.group == group) {
+                let old = get(s, choice.key).clone();
+                sel_setting(ui, s, dirty, choice.key, c.row(), choice.label, choice.key, choice.options);
+                changed |= old != *get(s, choice.key);
+            }
+            for p in PARAMETERS.iter().filter(|p| p.group == group) {
+                let mut value = get(s, p.key).as_f64().unwrap_or(p.default as f64) as f32;
+                let precision = if p.step < 0.01 { 3 } else if p.step < 0.1 { 2 } else { 1 };
+                if ui.slider(p.key, c.row(), &mut value, p.min, p.max, p.step, p.label, &|v| format!("{v:.precision$}")) {
+                    s[p.key] = json!(value);
+                    changed = true;
+                }
+            }
+        }
+        heights[column] = c.used();
+    }
+    if changed {
+        // Apply the same cross-field bounds used by the game before saving:
+        // full speed exceeds onset, minimum strength never exceeds its limit.
+        Settings::from_json(s).write_json(s);
+        *dirty = 0.3;
+    }
+    heights
+}
+
 /// How the game looks and how fast it runs.
 fn graphics_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) -> [f32; 2] {
     let mut c = Col::new(ui, cols[0], "Graphics");
@@ -572,11 +644,13 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
     toggle_setting(ui, s, dirty, c.row(), "Force feedback and vibration", "ff_enabled");
     toggle_setting(ui, s, dirty, c.row(), "Invert force feedback by default", "ff_invert");
     c.y += ui.paragraph("Wheels with a saved direction use their own setting under Controls → Game controllers.", Vec2::new(c.inner.x, c.y), c.inner.w, 12.5, Weight::Regular, TEXT_DIM) + 8.0;
+    toggle_setting(ui, s, dirty, c.row(), "Telemetry force feedback", "ff_telemetry");
     if ui.button("s-wreset", c.row(), "Reset wheel settings", Some("restart_alt"), ButtonKind::Normal) {
         s["wheel_range"] = json!(900.0);
         s["wheel_lock"] = json!(0.0);
         s["ff_invert"] = json!(false);
         s["ff_enabled"] = json!(true);
+        s["ff_telemetry"] = json!(true);
         *dirty = 0.3;
     }
     if ui.button("s-go-pads", c.row(), "Set up a wheel or pedals", Some("sports_esports"), ButtonKind::Normal) {
@@ -1009,7 +1083,10 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     }
     if pv.devices.is_none() {
         let root = std::path::PathBuf::from(&l.state.config.root);
-        pv.devices = Some(crate::controllers::read_cfg(&root));
+        let defaults = core::ffb::Settings::from_json(&l.state.settings);
+        let mut devices = crate::controllers::read_cfg(&root);
+        for device in &mut devices { device.ffb.get_or_insert(defaults); }
+        pv.devices = Some(devices);
     }
     // what the devices do now (and a button pressed while one is awaited)
     let mut pressed: Vec<(String, usize)> = Vec::new();
@@ -1075,8 +1152,9 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         pv.wizard = None;
     }
     if let Some(name) = add {
-        devices.push(DeviceCfg { name, second: "0".into(), ..Default::default() });
+        devices.push(DeviceCfg { name, second: "0".into(), ffb: Some(core::ffb::Settings::from_json(&l.state.settings)), ..Default::default() });
         pv.selected = devices.len() - 1;
+        pv.detail_tab = 0;
         pv.revealed_button = None;
         pv.dirty = true;
         // a new device starts with the assistant
@@ -1136,7 +1214,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     {
         let offs: Vec<String> = l.state.settings.get("ctrl_off").and_then(|v| v.as_str()).unwrap_or("").split('|').map(str::to_string).filter(|s| !s.is_empty()).collect();
         let mut on = !offs.iter().any(|o| o.eq_ignore_ascii_case(&d.name));
-        if l.ui.toggle("pad-on", Rect::new(inner.right() - 400.0, inner.y - 36.0, 170.0, 30.0), &mut on, "Use this device") {
+        if l.ui.toggle("pad-on", Rect::new(inner.x, inner.y, 170.0, 30.0), &mut on, "Use this device") {
             let mut offs: Vec<String> = offs.into_iter().filter(|o| !o.eq_ignore_ascii_case(&d.name)).collect();
             if !on {
                 offs.push(d.name.clone());
@@ -1147,6 +1225,29 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     }
     if l.ui.button("pad-wizard", Rect::new(inner.right() - 220.0, inner.y - 36.0, 220.0, 30.0), "Set up step by step", Some("touch_app"), ButtonKind::Normal) {
         pv.wizard = Some(Wizard { step: 0, rest: [None; 8], at: Vec::new(), error: None, calibration: None, ff_choice: None, test_strength: crate::ffb_calibration::PULSE_FORCE });
+    }
+    if l.ui.segmented("pad-detail-tab", Rect::new(inner.x, inner.y + 40.0, inner.w.min(520.0), 34.0), &mut pv.detail_tab, &["Axes and buttons", "Force feedback"]) {
+        pv.capturing = false;
+    }
+    let mut inner = Rect::new(inner.x, inner.y + 86.0, inner.w, (inner.h - 86.0).max(0.0));
+    if pv.detail_tab == 1 {
+        if live_dev.is_some_and(|c| !c.ff_capable) {
+            l.ui.label(Rect::new(inner.x, inner.y, inner.w, 28.0), "This device does not report force feedback support.");
+            inner.y += 34.0;
+            inner.h = (inner.h - 34.0).max(0.0);
+        }
+        if !live_dev.is_some_and(|c| c.gamepad) {
+            let mut invert = d.ff_invert.unwrap_or_else(|| l.state.settings.get("ff_invert").and_then(|v| v.as_bool()).unwrap_or(false));
+            if l.ui.toggle("pad-ff-invert", Rect::new(inner.x, inner.y, inner.w, 36.0), &mut invert, "Invert force feedback") {
+                d.ff_invert = Some(invert);
+                pv.dirty = true;
+            }
+            inner.y += 44.0;
+            inner.h = (inner.h - 44.0).max(0.0);
+        }
+        let defaults = core::ffb::Settings::from_json(&l.state.settings);
+        if device_force_feedback(&mut l.ui, d, defaults, inner, &mut pv.ffb_heights) { pv.dirty = true; }
+        return;
     }
     const AXES: [&str; 8] = ["X axis", "Y axis", "Z axis", "X rotation", "Y rotation", "Z rotation", "Slider 1", "Slider 2"];
     let funcs: Vec<String> = Func::LABELS.iter().map(|s| s.to_string()).collect();
@@ -1179,27 +1280,6 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         let x0 = v.x + 6.0;
         let w = v.w - 16.0;
         let mut y = v.y;
-        if live_dev.is_some_and(|c| c.ff_capable) || d.ff_invert.is_some() {
-            let (mut steering_force, mut vibration) = d.ff_scale.unwrap_or((1.0, 1.0));
-            if ui.slider("pad-ff-steering", Rect::new(x0, y, w, ROW), &mut steering_force, 0.0, 2.0, 0.05, "Steering force", &|v| format!("{:.0}%", v * 100.0)) {
-                d.ff_scale = Some((steering_force, vibration));
-                dirty = true;
-            }
-            y += ROW + 6.0;
-            if ui.slider("pad-ff-vibration", Rect::new(x0, y, w, ROW), &mut vibration, 0.0, 2.0, 0.05, "Vibration", &|v| format!("{:.0}%", v * 100.0)) {
-                d.ff_scale = Some((steering_force, vibration));
-                dirty = true;
-            }
-            y += ROW + 20.0;
-            if !live_dev.is_some_and(|c| c.gamepad) {
-                let mut invert = d.ff_invert.unwrap_or_else(|| l.state.settings.get("ff_invert").and_then(|v| v.as_bool()).unwrap_or(false));
-                if ui.toggle("pad-ff-invert", Rect::new(x0, y, w, ROW), &mut invert, "Invert force feedback") {
-                    d.ff_invert = Some(invert);
-                    dirty = true;
-                }
-                y += ROW + 20.0;
-            }
-        }
         let lab_w = if w < 520.0 { 84.0 } else { 110.0 };
         let inv_w = 110.0;
         let shp_w = 140.0;
@@ -2141,7 +2221,7 @@ mod settings_tests {
         }
         let driving = vec![
             "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-brake_hold", "set-auto_clutch", "set-momentary_gears", "s-go-keys",
-            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-wreset", "s-go-pads",
+            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "set-ff_telemetry", "s-wreset", "s-go-pads",
         ];
         let mut camera = vec![
             "s-seaty", "s-seatz", "s-seatx", "s-seatreset", "s-fov", "set-steer_look", "s-steer-look-angle", "s-steer-look-response", "set-head_movement", "set-driverview_smooth", "set-hands_in_cab", "set-alt_view",
@@ -2231,5 +2311,90 @@ mod settings_tests {
         let out = click(5, "s-reset", &mut s);
         assert!(out.reset);
         assert_eq!(s, before);
+    }
+}
+
+#[cfg(test)]
+mod device_feedback_tests {
+    use super::*;
+    use crate::controllers::{DeviceCfg, Func};
+
+    fn frame(ui: &mut Ui, device: &mut DeviceCfg, heights: &mut [f32; 2]) -> bool {
+        ui.begin(Vec2::new(1200.0, 2200.0), 1.0, 1.0 / 60.0);
+        device_force_feedback(ui, device, core::ffb::Settings::default(), Rect::new(0.0, 0.0, 1180.0, 2100.0), heights)
+    }
+
+    fn click(ui: &mut Ui, name: &str, device: &mut DeviceCfg, heights: &mut [f32; 2]) -> bool {
+        frame(ui, device, heights);
+        ui.input.mouse = ui.drawn[&id_of(name)].center();
+        ui.input.pressed = true;
+        ui.input.down = true;
+        let down_changed = frame(ui, device, heights);
+        ui.input.pressed = false;
+        ui.input.down = false;
+        ui.input.released = true;
+        let up_changed = frame(ui, device, heights);
+        ui.input.released = false;
+        down_changed || up_changed
+    }
+
+    #[test]
+    fn all_plugin_controls_belong_to_the_device_and_replace_the_old_sliders() {
+        assert!(!SETTINGS_TABS.contains(&"Force feedback"));
+        let mut ui = Ui::new();
+        let mut device = DeviceCfg { name: "Test wheel".into(), ffb: Some(Default::default()), ..Default::default() };
+        frame(&mut ui, &mut device, &mut [0.0; 2]);
+        let mut controls = vec!["ffb-preset-reset", "set-ffb_calculated_damping", "set-ffb_calculated_friction"];
+        controls.extend(core::ffb::PARAMETERS.iter().map(|p| p.key));
+        controls.extend(core::ffb::CHOICES.iter().map(|c| c.key));
+        for name in controls { assert!(ui.drawn.contains_key(&id_of(name)), "{name}"); }
+        assert!(!ui.drawn.contains_key(&id_of("pad-ff-steering")));
+        assert!(!ui.drawn.contains_key(&id_of("pad-ff-vibration")));
+    }
+
+    #[test]
+    fn editing_switching_and_resetting_tuning_leave_the_other_device_and_bindings_alone() {
+        let mut first = DeviceCfg { name: "Wheel A".into(), ffb: Some(core::ffb::Settings { overall_gain: 0.27, ..Default::default() }),
+            buttons: vec![("horn".into(), "0".into())], ..Default::default() };
+        first.axes[0] = Some((Func::Steering, true));
+        let mut second = DeviceCfg { name: "Wheel B".into(), ffb: Some(core::ffb::Settings { overall_gain: 0.62, ..Default::default() }), ..Default::default() };
+        let mut ui = Ui::new();
+        let mut heights = [0.0; 2];
+        assert!(click(&mut ui, "set-ffb_calculated_friction", &mut first, &mut heights));
+        assert!(!first.ffb.unwrap().calculated_friction);
+        assert!(click(&mut ui, "ffb_overall_gain", &mut first, &mut heights));
+        assert_ne!(first.ffb.unwrap().overall_gain, 0.27);
+        assert!(!frame(&mut ui, &mut second, &mut heights));
+        assert_eq!(second.ffb.unwrap().overall_gain, 0.62);
+        assert!(click(&mut ui, "ffb-preset-reset", &mut first, &mut heights));
+        assert_eq!(first.ffb.unwrap(), core::ffb::Settings::default());
+        assert_eq!(first.axes[0], Some((Func::Steering, true)));
+        assert_eq!(first.buttons, vec![("horn".into(), "0".into())]);
+        let loaded = crate::controllers::parse_cfg(&crate::controllers::cfg_text(&[first.clone(), second.clone()]));
+        assert_eq!(loaded[0].ffb, first.ffb);
+        assert_eq!(loaded[1].ffb, second.ffb);
+    }
+
+    #[test]
+    fn editing_an_unmigrated_device_starts_from_the_global_preset() {
+        let mut ui = Ui::new();
+        let mut device = DeviceCfg { name: "Older wheel".into(), ..Default::default() };
+        let defaults = core::ffb::Settings { overall_gain: 0.33, ..Default::default() };
+        let mut heights = [0.0; 2];
+        ui.begin(Vec2::new(1200.0, 2200.0), 1.0, 1.0 / 60.0);
+        assert!(!device_force_feedback(&mut ui, &mut device, defaults, Rect::new(0.0, 0.0, 1180.0, 2100.0), &mut heights));
+        assert_eq!(device.ffb, None);
+        ui.input.mouse = ui.drawn[&id_of("set-ffb_calculated_friction")].center();
+        ui.input.pressed = true;
+        ui.input.down = true;
+        ui.begin(Vec2::new(1200.0, 2200.0), 1.0, 1.0 / 60.0);
+        let down_changed = device_force_feedback(&mut ui, &mut device, defaults, Rect::new(0.0, 0.0, 1180.0, 2100.0), &mut heights);
+        ui.input.pressed = false;
+        ui.input.down = false;
+        ui.input.released = true;
+        ui.begin(Vec2::new(1200.0, 2200.0), 1.0, 1.0 / 60.0);
+        let up_changed = device_force_feedback(&mut ui, &mut device, defaults, Rect::new(0.0, 0.0, 1180.0, 2100.0), &mut heights);
+        assert!(down_changed || up_changed);
+        assert_eq!(device.ffb.unwrap().overall_gain, 0.33);
     }
 }

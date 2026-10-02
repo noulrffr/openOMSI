@@ -144,7 +144,7 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   does not manage are kept as they are. One tab for each thing one comes to change:
   *Graphics* (the quality preset first, the screen, distances and memory), *Driving* (keys,
   mouse, wheel and pedals, with the way to the Controls page), *Camera* (the seat, the views,
-  head tracking, VR), *Sound*, *Gameplay* (passengers, traffic, collisions, the clock) and
+  head tracking, VR), *Sound*, *Gameplay* (passengers, traffic, collisions, the clock),
   *General* (language, the game's interface size, navigator, updates, and resetting every
   setting).
 * **Controls** - `Inputs/keyboard.cfg`: click a key, press the new one; clashes are red. The
@@ -156,13 +156,19 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   each pedal); every button of the device is listed (press one to jump to it). On Windows the
   devices are read through DirectInput, as OMSI does, so wheels Windows lists can be
   configured for steering. Force feedback needs a driver that supports constant force:
-  parking resistance eases as the bus rolls, with centring and
-  feedback from the bus's sideways acceleration, short bumps when the front wheels cross
-  an edge, plus the scripts' shaking, `FF_Vib_Amp`. A wheel nobody has set up steers with
-  its X axis. A wheel that a community controller mapping also makes a gamepad (a
-  Logitech G29) is listed once, and *Use this device* switches any device off
-  (it is then neither read nor listed as steering). Select a device to adjust *Steering force*
-  (centering and resistance) and *Vibration* separately, then press **Save**. The values are stored
+  the default *Telemetry force feedback* model uses speed-sensitive centring, wheel-motion
+  damping and friction, braking and grip feedback, front-wheel bumps and script shaking
+  (`FF_Vib_Amp`). Switch it off in Settings → Driving to compare with the previous model.
+  Select your device, then its **Force feedback** tab to tune the 74 plugin parameters.
+  Each device has its own preset and **Restore plugin tuning** button. Press **Save**;
+  changes apply when a new game starts. See [Force feedback](FORCE_FEEDBACK.md) for details.
+  A wheel nobody has set up steers with
+  its X axis. While a wheel supplies steering, its position takes priority over steering
+  keys even when the wheel is centered. A wheel that a community controller mapping also
+  makes a gamepad (a Logitech G29) is listed once, and *Use this device* switches any device off
+  (it is then neither read nor listed as steering). The device's **Axes and buttons** tab
+  manages bindings; **Force feedback** replaces the old Steering force and Vibration sliders.
+  The values are stored
   for that device in the content folder's `Inputs/gamectrler.cfg`; restart a running game to use
   the new values. *Force feedback and vibration* in Settings → Driving remains the global on/off switch.
 * **Sessions** - every game started from the launcher, with its log, a **Stop** that lets

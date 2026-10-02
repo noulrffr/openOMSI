@@ -625,6 +625,9 @@ impl ApplicationHandler for App {
                 ctl.pedal_brake = self.settings.pedal_brake;
                 ctl.ff_invert = self.settings.ff_invert;
                 ctl.ff_enabled = self.settings.ff_enabled;
+                ctl.ff_telemetry = self.settings.ff_telemetry;
+                ctl.ffb_defaults = self.settings.ffb;
+                ctl.wheel_degrees = self.settings.wheel_range;
                 ctl.steer_gain = if self.settings.wheel_lock >= 45.0 { (self.settings.wheel_range / self.settings.wheel_lock).clamp(0.1, 20.0) } else { 1.0 };
                 if ctl.disabled.is_empty() && !self.settings.ctrl_off.is_empty() {
                     ctl.disabled = self.settings.ctrl_off.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -638,17 +641,9 @@ impl ApplicationHandler for App {
                 // (in every view of the bus - the wheel went slack outside and in the
                 // passenger view)
                 let driving = self.player.as_ref().filter(|_| matches!(self.view.as_str(), "driver" | "outside" | "pax") && !self.paused);
-                let kmh = driving.map(|p| p.vehicle.physics.velocity_kmh()).unwrap_or(0.0);
-                ctl.feedback(crate::controllers::FfInput {
-                    on: driving.is_some(),
-                    kmh,
-                    lateral_accel: driving.and_then(|p| p.vehicle.rigid.as_ref()).map(|r| r.accel_body.x).unwrap_or(0.0),
-                    wheel_bump: driving.and_then(|p| p.vehicle.rigid.as_ref()).map(|r| crate::controllers::wheel_contact_bump(r, kmh)).unwrap_or(0.0),
-                    wheel_bump_age: 0.0,
-                    vib_amp: driving.and_then(|p| p.vehicle.var("FF_Vib_Amp")).unwrap_or(0.0),
-                    vib_period: driving.and_then(|p| p.vehicle.var("FF_Vib_Period")).unwrap_or(0.0),
-                    dt,
-                });
+                // FFB needs elapsed wall time, including stalls hidden by physics' dt cap.
+                ctl.feedback(driving.map(|p| crate::controllers::FfInput::from_vehicle(&p.vehicle, raw_dt))
+                    .unwrap_or(crate::controllers::FfInput { dt: raw_dt, ..Default::default() }));
                 // OMSI's mouse control: the cursor's place across steers, above the middle
                 // of the window is the throttle, below it the brake.
                 // Steering as Omsi.exe has it (0x6f4284..0x6f447b): the whole width of the

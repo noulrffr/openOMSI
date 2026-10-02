@@ -61,7 +61,6 @@ impl Wheel {
             let mut wheel = Wheel { name: name.to_string(), file, id: -1, level: None, sent: Instant::now() - Duration::from_secs(1) };
             wheel.send(FF_GAIN, 0xFFFF);
             if wheel.upload(0) {
-                wheel.send(wheel.id as u16, 1);
                 log::info!("force feedback: {name} on /dev/input/{node} (constant force)");
                 return Some(wheel);
             }
@@ -72,7 +71,8 @@ impl Wheel {
 
     pub fn set_force(&mut self, f: f32) -> bool {
         let level = (-f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        if self.level == Some(level) || self.sent.elapsed() < Duration::from_millis(10) {
+        // Refresh a held torque before its 300 ms timeout. Zero bypasses throttling.
+        if (self.level == Some(level) && self.sent.elapsed() < Duration::from_millis(100)) || (level != 0 && self.sent.elapsed() < Duration::from_millis(10)) {
             return true;
         }
         self.upload(level) || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENODEV)
@@ -88,7 +88,7 @@ impl Wheel {
     }
 
     fn upload(&mut self, level: i16) -> bool {
-        self.upload_for(level, 0)
+        self.upload_for(level, 300)
     }
 
     fn upload_for(&mut self, level: i16, milliseconds: u16) -> bool {
@@ -102,6 +102,7 @@ impl Wheel {
         }
         self.id = effect.id;
         self.level = Some(level);
+        self.send(self.id as u16, 1);
         true
     }
 

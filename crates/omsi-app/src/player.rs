@@ -22,6 +22,23 @@ pub(crate) fn steering_view_yaw(current: f32, steering: f32, dt: f32, enabled: b
     current + (target - current) * (1.0 - (-dt.max(0.0) / response.clamp(0.05, 1.0)).exp())
 }
 
+/// A physical wheel owns steering even at its centre. Keep the keyboard's stored
+/// position aligned with it so unplugging the wheel cannot reveal an old key turn.
+fn steering_control(axes: &mut omsi_sim::KeyboardAxes, analog: crate::controllers::Analog) -> f32 {
+    match analog.steering {
+        Some(position) if !analog.stick => {
+            axes.steering = position;
+            axes.steer_vel = 0.0;
+            axes.centering = false;
+            position
+        }
+        // A gamepad stick is not a physical wheel: preserve keyboard steering
+        // while the stick rests in its centre.
+        Some(position) if position.abs() > 0.02 || axes.steering == 0.0 => position,
+        _ => axes.steering,
+    }
+}
+
 fn is_manual_gate_action(name: &str) -> bool {
     let Some(gate) = name.get(..5).filter(|p| p.eq_ignore_ascii_case("kw_s_")).and_then(|_| name.get(5..)) else {
         return false;
@@ -1261,15 +1278,12 @@ impl Player {
             self.axes.brake = 0.0;
         }
         self.auto_clutch_bite(a.throttle.unwrap_or(0.0).max(self.axes.throttle));
+        let steering = steering_control(&mut self.axes, a);
         self.vehicle.set_controls(omsi_sim::Controls {
             throttle: a.throttle.unwrap_or(self.axes.throttle).max(self.axes.throttle),
             brake: a.brake.unwrap_or(self.axes.brake).max(self.axes.brake),
             clutch: a.clutch.unwrap_or(self.axes.clutch).max(self.axes.clutch),
-            // (a wheel at rest does not hold against the keys)
-            steering: match a.steering {
-                Some(s) if s.abs() > 0.02 || self.axes.steering == 0.0 => s,
-                _ => self.axes.steering,
-            },
+            steering,
         });
         self.vehicle.update(dt);
         // OMSI_SUSP_TRACE_WINDOW=<csv>: each wheel's travel every frame of a window run
@@ -2325,6 +2339,39 @@ mod indicator_tests {
         assert_eq!(state, 3);
         assert_eq!(indicator_toggle_action(&mut state, Some(3), 3), "blinker_warn_toggle");
         assert_eq!(state, 0);
+    }
+}
+
+#[cfg(test)]
+mod steering_input_tests {
+    use super::steering_control;
+    use crate::controllers::Analog;
+    use omsi_sim::{EngineAction, KeyboardAxes};
+
+    #[test]
+    fn centered_wheel_cannot_be_moved_by_a_held_keyboard_key() {
+        let mut keys = KeyboardAxes::default();
+        keys.set(EngineAction::SteeringRight, true);
+        let wheel = Analog { steering: Some(0.0), ..Default::default() };
+        for _ in 0..30 {
+            keys.update(1.0 / 60.0);
+            assert_eq!(steering_control(&mut keys, wheel), 0.0);
+        }
+        assert_eq!(keys.steering, 0.0);
+
+        keys.update(1.0 / 60.0);
+        assert_eq!(steering_control(&mut keys, Analog { steering: Some(0.01), ..wheel }), 0.01);
+        keys.update(1.0 / 60.0);
+        let after_disconnect = steering_control(&mut keys, Analog::default());
+        assert!(after_disconnect > 0.01 && after_disconnect < 0.04, "{after_disconnect}");
+    }
+
+    #[test]
+    fn keyboard_can_still_steer_with_a_centered_gamepad_stick() {
+        let mut keys = KeyboardAxes { steering: 0.5, ..Default::default() };
+        let pad = Analog { steering: Some(0.0), stick: true, ..Default::default() };
+        assert_eq!(steering_control(&mut keys, pad), 0.5);
+        assert_eq!(steering_control(&mut keys, Analog { steering: Some(0.1), ..pad }), 0.1);
     }
 }
 

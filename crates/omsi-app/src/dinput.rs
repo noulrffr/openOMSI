@@ -481,7 +481,8 @@ impl DirectInput {
                 let mut eff = DIEFFECT {
                     dwSize: std::mem::size_of::<DIEFFECT>() as u32,
                     dwFlags: DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS,
-                    dwDuration: u32::MAX, // INFINITE
+                    // Refreshed by set_force; let go if the game stalls.
+                    dwDuration: 300_000,
                     dwGain: DI_FFNOMINALMAX,
                     dwTriggerButton: DIEB_NOTRIGGER,
                     cAxes: 1,
@@ -624,7 +625,8 @@ impl DirectInput {
         if !self.focused {
             return true;
         }
-        if self.last_force.elapsed() < Duration::from_millis(10) {
+        // Muting must bypass the rate limit (pause, disable, device handover).
+        if f != 0.0 && self.last_force.elapsed() < Duration::from_millis(10) {
             return true;
         }
         self.last_force = Instant::now();
