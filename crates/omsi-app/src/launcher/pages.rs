@@ -436,7 +436,7 @@ fn settings_tab(ui: &mut Ui, tab: usize, s: &mut Value, dirty: &mut f32, out: &m
 }
 
 /// Legacy keeps its FFScale controls; telemetry has its own tuning in two views.
-fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg, defaults: core::ffb::Settings, default_telemetry: bool, body: Rect, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
+fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg, defaults: core::ffb::Settings, default_telemetry: bool, default_invert: bool, gamepad: bool, body: Rect, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
     let mut mode = usize::from(device.ff_telemetry.unwrap_or(default_telemetry));
     let mut changed = false;
     if ui.segmented("pad-ff-mode", Rect::new(body.x, body.y, body.w.min(460.0), 34.0), &mut mode, &["Legacy", "Telemetry"]) {
@@ -445,7 +445,15 @@ fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg
     }
     if mode == 0 {
         let (mut steering, mut vibration) = device.ff_scale.unwrap_or((1.0, 1.0));
-        let scale_y = body.y + 46.0;
+        let mut scale_y = body.y + 46.0;
+        if !gamepad {
+            let mut invert = device.ff_invert.unwrap_or(default_invert);
+            if ui.toggle("pad-ff-invert", Rect::new(body.x, scale_y, body.w, 36.0), &mut invert, "Invert force feedback") {
+                device.ff_invert = Some(invert);
+                changed = true;
+            }
+            scale_y += 44.0;
+        }
         let mut scale_changed = false;
         if ui.slider("pad-ff-steering", Rect::new(body.x, scale_y, body.w, ROW), &mut steering, 0.0, 2.0, 0.05, "Steering force", &|v| format!("{:.0}%", v * 100.0)) {
             scale_changed = true;
@@ -485,6 +493,10 @@ fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg
     } else {
         ui.scroll_area(&format!("pad-ffb-simple-{}", device.name), list, &mut |ui, v| {
             let mut c = Col::new(ui, Rect::new(v.x, v.y, v.w - 10.0, v.h.max(heights[0])), "Telemetry");
+            for key in SIMPLE_FEEDBACK_CHOICES {
+                let choice = core::ffb::CHOICES.iter().find(|p| p.key == *key).expect("simple choice exists");
+                feedback_choice(ui, &mut values, &mut tuning_changed, c.row(), choice);
+            }
             for key in SIMPLE_FEEDBACK_KEYS {
                 let p = core::ffb::PARAMETERS.iter().find(|p| p.key == *key).expect("simple parameter exists");
                 feedback_parameter(ui, &mut values, &mut tuning_changed, c.row(), p);
@@ -499,6 +511,8 @@ fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg
     }
     changed
 }
+
+const SIMPLE_FEEDBACK_CHOICES: &[&str] = &["ffb_force_direction", "ffb_resistance_direction"];
 
 const SIMPLE_FEEDBACK_KEYS: &[&str] = &[
     "ffb_overall_gain", "ffb_output_limit", "ffb_model_force_limit",
@@ -515,6 +529,12 @@ fn feedback_parameter(ui: &mut Ui, s: &mut Value, changed: &mut bool, row: Rect,
         s[p.key] = json!(value);
         *changed = true;
     }
+}
+
+fn feedback_choice(ui: &mut Ui, s: &mut Value, changed: &mut bool, row: Rect, choice: &core::ffb::Choice) {
+    let mut dirty = 0.0;
+    sel_setting(ui, s, &mut dirty, choice.key, row, choice.label, choice.key, choice.options);
+    *changed |= dirty > 0.0;
 }
 
 fn advanced_feedback_controls(ui: &mut Ui, s: &mut Value, changed: &mut bool, cols: [Rect; 2]) -> [f32; 2] {
@@ -537,9 +557,7 @@ fn advanced_feedback_controls(ui: &mut Ui, s: &mut Value, changed: &mut bool, co
                 }
             }
             for choice in CHOICES.iter().filter(|p| p.group == group) {
-                let mut dirty = 0.0;
-                sel_setting(ui, s, &mut dirty, choice.key, c.row(), choice.label, choice.key, choice.options);
-                *changed |= dirty > 0.0;
+                feedback_choice(ui, s, changed, c.row(), choice);
             }
             for p in PARAMETERS.iter().filter(|p| p.group == group) {
                 feedback_parameter(ui, s, changed, c.row(), p);
@@ -1320,11 +1338,12 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     }
     // the assistant, over the device's page
     if let Some(w) = pv.wizard.as_mut() {
+        let telemetry = d.ff_telemetry.unwrap_or_else(|| l.state.settings.get("ff_telemetry").and_then(Value::as_bool).unwrap_or(false));
         let done = if w.step == WIZARD_STEPS.len() {
             feedback_setup(&mut l.ui, inner, w, d, &live, live_dev, &mut pv.io, &mut pv.feedback_test, hwnd,
                            l.state.settings.get("ff_invert").and_then(|v| v.as_bool()).unwrap_or(false))
         } else {
-            wizard(&mut l.ui, inner, w, d, &live, live_dev.is_some(), live_dev.is_some_and(|c| c.ff_capable && !c.gamepad))
+            wizard(&mut l.ui, inner, w, d, &live, live_dev.is_some(), live_dev.is_some_and(|c| c.ff_capable && !c.gamepad) && !telemetry)
         };
         match done {
             Some(true) => {
@@ -1374,18 +1393,11 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         }
         inner.y += 44.0;
         inner.h = (inner.h - 44.0).max(0.0);
-        if !live_dev.is_some_and(|c| c.gamepad) {
-            let mut invert = d.ff_invert.unwrap_or_else(|| l.state.settings.get("ff_invert").and_then(|v| v.as_bool()).unwrap_or(false));
-            if l.ui.toggle("pad-ff-invert", Rect::new(inner.x, inner.y, inner.w, 36.0), &mut invert, "Invert force feedback") {
-                d.ff_invert = Some(invert);
-                pv.dirty = true;
-            }
-            inner.y += 44.0;
-            inner.h = (inner.h - 44.0).max(0.0);
-        }
         let defaults = core::ffb::Settings::from_json(&l.state.settings);
         let default_telemetry = l.state.settings.get("ff_telemetry").and_then(Value::as_bool).unwrap_or(false);
-        if device_force_feedback(&mut l.ui, d, defaults, default_telemetry, inner, &mut pv.ffb_advanced, &mut pv.ffb_heights) { pv.dirty = true; }
+        let default_invert = l.state.settings.get("ff_invert").and_then(Value::as_bool).unwrap_or(false);
+        let gamepad = live_dev.is_some_and(|c| c.gamepad);
+        if device_force_feedback(&mut l.ui, d, defaults, default_telemetry, default_invert, gamepad, inner, &mut pv.ffb_advanced, &mut pv.ffb_heights) { pv.dirty = true; }
         return;
     }
     const AXES: [&str; 8] = ["X axis", "Y axis", "Z axis", "X rotation", "Y rotation", "Z rotation", "Slider 1", "Slider 2"];
@@ -2458,7 +2470,7 @@ mod device_feedback_tests {
 
     fn frame(ui: &mut Ui, device: &mut DeviceCfg, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
         ui.begin(Vec2::new(1200.0, 2200.0), 1.0, 1.0 / 60.0);
-        device_force_feedback(ui, device, core::ffb::Settings::default(), false, Rect::new(0.0, 0.0, 1180.0, 2100.0), advanced, heights)
+        device_force_feedback(ui, device, core::ffb::Settings::default(), false, false, false, Rect::new(0.0, 0.0, 1180.0, 2100.0), advanced, heights)
     }
 
     fn click_id(ui: &mut Ui, id: u64, device: &mut DeviceCfg, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
@@ -2485,12 +2497,18 @@ mod device_feedback_tests {
         assert!(!frame(&mut ui, &mut device, &mut advanced, &mut heights));
         assert!(ui.drawn.contains_key(&id_of("pad-ff-steering")));
         assert!(ui.drawn.contains_key(&id_of("pad-ff-vibration")));
+        assert!(ui.drawn.contains_key(&id_of("pad-ff-invert")));
         assert!(!ui.drawn.contains_key(&id_of("ffb_overall_gain")));
+        assert!(click_id(&mut ui, id_of("pad-ff-invert"), &mut device, &mut advanced, &mut heights));
+        assert_eq!(device.ff_invert, Some(true));
         assert!(click_id(&mut ui, id_of("pad-ff-mode") ^ 12, &mut device, &mut advanced, &mut heights));
         assert_eq!(device.ff_telemetry, Some(true));
         frame(&mut ui, &mut device, &mut advanced, &mut heights);
         assert!(!ui.drawn.contains_key(&id_of("pad-ff-steering")));
         assert!(!ui.drawn.contains_key(&id_of("pad-ff-vibration")));
+        assert!(!ui.drawn.contains_key(&id_of("pad-ff-invert")));
+        assert_eq!(device.ff_invert, Some(true));
+        for key in SIMPLE_FEEDBACK_CHOICES { assert!(ui.drawn.contains_key(&id_of(key)), "{key}"); }
         for key in SIMPLE_FEEDBACK_KEYS { assert!(ui.drawn.contains_key(&id_of(key)), "{key}"); }
         assert!(!ui.drawn.contains_key(&id_of("ffb_rolling_radius_filter_time")));
         click_id(&mut ui, id_of("pad-ff-view") ^ 12, &mut device, &mut advanced, &mut heights);

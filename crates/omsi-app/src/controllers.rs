@@ -906,8 +906,8 @@ impl Controllers {
                 #[cfg(windows)]
                 let axis_reversed = self.devices.di.as_ref().is_some_and(|di| force_axis_reversed(cfg, di.force_axis(name)));
                 #[cfg(not(windows))]
-                let axis_reversed = calibrated_steering_reversed(cfg);
-                log::info!("force feedback: steering source {name}, effect available: {effect}, config: {}, steering force: {steering:.2}, vibration: {vibration:.2}, invert: {}", cfg.map(|d| d.name.as_str()).unwrap_or("none"), feedback_inverted(cfg, self.ff_invert, axis_reversed));
+                let axis_reversed = calibrated_steering_reversed(cfg, telemetry);
+                log::info!("force feedback: steering source {name}, effect available: {effect}, config: {}, steering force: {steering:.2}, vibration: {vibration:.2}, invert: {}", cfg.map(|d| d.name.as_str()).unwrap_or("none"), feedback_inverted_for_mode(cfg, self.ff_invert, axis_reversed, telemetry));
             }
         }
         #[cfg(windows)]
@@ -928,7 +928,7 @@ impl Controllers {
             // The wheel force is calculated from the steering axis after its configured
             // reversal, while DirectInput sends forces in the physical axis direction.
             let axis_reversed = force_axis_reversed(cfg, di.force_axis(&name));
-            let force = if feedback_inverted(cfg, self.ff_invert, axis_reversed) { -force } else { force };
+            let force = if feedback_inverted_for_mode(cfg, self.ff_invert, axis_reversed, telemetry) { -force } else { force };
             if di.set_force(&name, force) {
                 self.rumble.clear();
                 return;
@@ -948,8 +948,8 @@ impl Controllers {
                 let force = if !on { 0.0 } else if telemetry {
                     self.ff_model.update(&f.telemetry, x, self.wheel_degrees, f.dt, k_s, k_e)
                 } else { wheel_force(&f, x, x0, &mut self.ff_t, k_s, k_e) };
-                let axis_reversed = calibrated_steering_reversed(cfg);
-                let inverted = feedback_inverted(cfg, self.ff_invert, axis_reversed);
+                let axis_reversed = calibrated_steering_reversed(cfg, telemetry);
+                let inverted = feedback_inverted_for_mode(cfg, self.ff_invert, axis_reversed, telemetry);
                 if !w.set_force(if inverted { -force } else { force }) {
                     log::warn!("force feedback: {name} went away; looking for it again");
                     self.wheel = None;
@@ -1183,10 +1183,14 @@ fn feedback_inverted(cfg: Option<&DeviceCfg>, global: bool, axis_reversed: bool)
     cfg.and_then(|d| d.ff_invert).unwrap_or(global) ^ axis_reversed
 }
 
+fn feedback_inverted_for_mode(cfg: Option<&DeviceCfg>, global: bool, axis_reversed: bool, telemetry: bool) -> bool {
+    if telemetry { axis_reversed } else { feedback_inverted(cfg, global, axis_reversed) }
+}
+
 #[cfg_attr(windows, allow(dead_code))]
-fn calibrated_steering_reversed(cfg: Option<&DeviceCfg>) -> bool {
-    // Linux previously applied the global sign directly; preserve it for uncalibrated wheels.
-    cfg.filter(|d| d.ff_invert.is_some())
+fn calibrated_steering_reversed(cfg: Option<&DeviceCfg>, telemetry: bool) -> bool {
+    // Keep Legacy's old global-sign behavior; Telemetry always corrects the steering axis.
+    cfg.filter(|d| telemetry || d.ff_invert.is_some())
         .and_then(|d| d.axes.iter().flatten().find(|(function, _)| *function == Func::Steering))
         .is_some_and(|(_, reversed)| *reversed)
 }
@@ -1570,11 +1574,14 @@ mod cfg_tests {
         assert!(super::feedback_inverted(Some(&saved[2]), true, false));
         assert!(!super::feedback_inverted(Some(&saved[0]), false, true));
         assert!(super::feedback_inverted(Some(&saved[1]), true, true));
+        assert!(!super::feedback_inverted_for_mode(Some(&saved[0]), true, false, true));
+        assert!(super::feedback_inverted_for_mode(Some(&saved[1]), false, true, true));
         let mut reversed = super::DeviceCfg::default();
         reversed.axes[0] = Some((super::Func::Steering, true));
-        assert!(!super::calibrated_steering_reversed(Some(&reversed)));
+        assert!(!super::calibrated_steering_reversed(Some(&reversed), false));
+        assert!(super::calibrated_steering_reversed(Some(&reversed), true));
         reversed.ff_invert = Some(false);
-        assert!(super::calibrated_steering_reversed(Some(&reversed)));
+        assert!(super::calibrated_steering_reversed(Some(&reversed), false));
     }
 
     #[test]

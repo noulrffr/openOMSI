@@ -16,13 +16,12 @@ In Legacy mode, adjust **Steering force** and **Vibration** using the existing
 `[FFScale]` values. A saved zero mutes that legacy channel, including when imported
 from OMSI's `Inputs/gamectrler.cfg`. Telemetry has its own gain and strength controls;
 the legacy sliders are hidden and do not multiply telemetry output.
-**Invert force feedback** still reverses the final wheel force. The port uses
-openOMSI's steering coordinates; the plugin's hardware-specific
-`force_direction` and `resistance_direction` defaults are normalized to these
-coordinates. Advanced direction values can be changed on the Advanced panel.
-The device's **Invert force feedback** switch is on that tab too. The setup
-wizard can detect the direction with a brief motor pulse; its choice is saved
-for that wheel and overrides the global default.
+Legacy also has **Invert force feedback**, which reverses its final wheel force.
+The setup wizard can detect that Legacy direction with a brief motor pulse;
+its choice is saved for the wheel and overrides the old global default.
+Telemetry ignores the Legacy invert switch. Its **Base force direction** and
+**Resistance direction** controls appear in both Simple and Advanced and are
+saved in the same per-device telemetry profile.
 
 This runs inside openOMSI; installing the OPL or running its DirectInput worker is
 unnecessary. If the original FFB plugin is enabled in openOMSI's plugin list,
@@ -52,9 +51,9 @@ Each device can retain an independent advanced profile.
 ## Tuning in openOMSI
 
 Open **Controls → Game controllers**, select a device, then its **Force feedback**
-tab. Choose Legacy or Telemetry. Both modes have a per-device enable and direction
-switch. Legacy keeps the familiar Steering force and Vibration sliders. Telemetry offers a
-**Simple** panel with 13 key strengths and limits: overall gain, output and
+tab. Choose Legacy or Telemetry. Both modes have a per-device enable switch.
+Legacy keeps Invert force feedback, Steering force and Vibration. Telemetry offers a
+**Simple** panel with two direction choices and 13 key strengths and limits: overall gain, output and
 base-torque limits, centring at rest and speed, steering response, damping and
 friction at rest and speed, road kicks, impact strength and surface vibration.
 **Advanced** retains the full 74-option tuning, grouped in two columns, plus

@@ -168,10 +168,10 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   damping and friction, braking and grip feedback, front-wheel bumps and script shaking
   (`FF_Vib_Amp`). Select your device, then its **Force feedback** tab to choose
   Legacy or Telemetry. The device's Force feedback and vibration switch enables its
-  output, and Invert force feedback changes its direction. Legacy has Steering force
-  and Vibration sliders; Telemetry uses its own tuning instead.
-  Telemetry has a Simple panel for key strengths and limits and an Advanced panel
-  with the full tuning set. Press **Save**;
+  output. Legacy has Invert force feedback, Steering force and Vibration controls;
+  Telemetry uses its own tuning instead, including Base force direction and
+  Resistance direction in the Simple panel. The Advanced panel keeps the full
+  tuning set. Press **Save**;
   changes apply when a new game starts. See [Force feedback](FORCE_FEEDBACK.md) for details.
   A wheel nobody has set up steers with
   its X axis. While a wheel supplies steering, its position takes priority over steering
