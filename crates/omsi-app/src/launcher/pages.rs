@@ -435,7 +435,7 @@ fn settings_tab(ui: &mut Ui, tab: usize, s: &mut Value, dirty: &mut f32, out: &m
     }
 }
 
-/// The two FFScale values stay visible in either mode; telemetry tuning has two views.
+/// Legacy keeps its FFScale controls; telemetry has its own tuning in two views.
 fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg, defaults: core::ffb::Settings, default_telemetry: bool, body: Rect, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
     let mut mode = usize::from(device.ff_telemetry.unwrap_or(default_telemetry));
     let mut changed = false;
@@ -443,23 +443,25 @@ fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg
         device.ff_telemetry = Some(mode == 1);
         changed = true;
     }
-    let (mut steering, mut vibration) = device.ff_scale.unwrap_or((1.0, 1.0));
-    let scale_y = body.y + 46.0;
-    let mut scale_changed = false;
-    if ui.slider("pad-ff-steering", Rect::new(body.x, scale_y, body.w, ROW), &mut steering, 0.0, 2.0, 0.05, "Steering force", &|v| format!("{:.0}%", v * 100.0)) {
-        scale_changed = true;
+    if mode == 0 {
+        let (mut steering, mut vibration) = device.ff_scale.unwrap_or((1.0, 1.0));
+        let scale_y = body.y + 46.0;
+        let mut scale_changed = false;
+        if ui.slider("pad-ff-steering", Rect::new(body.x, scale_y, body.w, ROW), &mut steering, 0.0, 2.0, 0.05, "Steering force", &|v| format!("{:.0}%", v * 100.0)) {
+            scale_changed = true;
+        }
+        if ui.slider("pad-ff-vibration", Rect::new(body.x, scale_y + ROW + 6.0, body.w, ROW), &mut vibration, 0.0, 2.0, 0.05, "Vibration", &|v| format!("{:.0}%", v * 100.0)) {
+            scale_changed = true;
+        }
+        if scale_changed {
+            device.ff_scale = Some((steering, vibration));
+            changed = true;
+        }
+        return changed;
     }
-    if ui.slider("pad-ff-vibration", Rect::new(body.x, scale_y + ROW + 6.0, body.w, ROW), &mut vibration, 0.0, 2.0, 0.05, "Vibration", &|v| format!("{:.0}%", v * 100.0)) {
-        scale_changed = true;
-    }
-    if scale_changed {
-        device.ff_scale = Some((steering, vibration));
-        changed = true;
-    }
-    if mode == 0 { return changed; }
 
     let mut view = usize::from(*advanced);
-    let view_y = scale_y + ROW * 2.0 + 20.0;
+    let view_y = body.y + 46.0;
     if ui.segmented("pad-ff-view", Rect::new(body.x, view_y, body.w.min(460.0), 34.0), &mut view, &["Simple", "Advanced"]) {
         *advanced = view == 1;
     }
@@ -757,9 +759,6 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
             *dirty = 0.3;
         }
     }
-    toggle_setting(ui, s, dirty, c.row(), "Force feedback and vibration", "ff_enabled");
-    toggle_setting(ui, s, dirty, c.row(), "Invert force feedback by default", "ff_invert");
-    c.y += ui.paragraph("Wheels with a saved direction use their own setting under Controls → Game controllers.", Vec2::new(c.inner.x, c.y), c.inner.w, 12.5, Weight::Regular, TEXT_DIM) + 8.0;
     if ui.button("s-wreset", c.row(), "Reset wheel settings", Some("restart_alt"), ButtonKind::Normal) {
         s["wheel_range"] = json!(900.0);
         s["wheel_lock"] = json!(0.0);
@@ -1358,6 +1357,13 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
             inner.y += 34.0;
             inner.h = (inner.h - 34.0).max(0.0);
         }
+        let mut enabled = d.ff_enabled.unwrap_or_else(|| l.state.settings.get("ff_enabled").and_then(Value::as_bool).unwrap_or(true));
+        if l.ui.toggle("pad-ff-enabled", Rect::new(inner.x, inner.y, inner.w, 36.0), &mut enabled, "Force feedback and vibration") {
+            d.ff_enabled = Some(enabled);
+            pv.dirty = true;
+        }
+        inner.y += 44.0;
+        inner.h = (inner.h - 44.0).max(0.0);
         if !live_dev.is_some_and(|c| c.gamepad) {
             let mut invert = d.ff_invert.unwrap_or_else(|| l.state.settings.get("ff_invert").and_then(|v| v.as_bool()).unwrap_or(false));
             if l.ui.toggle("pad-ff-invert", Rect::new(inner.x, inner.y, inner.w, 36.0), &mut invert, "Invert force feedback") {
@@ -2342,7 +2348,7 @@ mod settings_tests {
         }
         let driving = vec![
             "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-brake_hold", "set-auto_clutch", "set-momentary_gears", "s-go-keys",
-            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-wreset", "s-go-pads",
+            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "s-wreset", "s-go-pads",
         ];
         let mut camera = vec![
             "s-seaty", "s-seatz", "s-seatx", "s-seatreset", "s-fov", "set-steer_look", "s-steer-look-angle", "s-steer-look-response", "set-head_movement", "set-driverview_smooth", "set-hands_in_cab", "set-alt_view",
@@ -2473,6 +2479,8 @@ mod device_feedback_tests {
         assert!(click_id(&mut ui, id_of("pad-ff-mode") ^ 12, &mut device, &mut advanced, &mut heights));
         assert_eq!(device.ff_telemetry, Some(true));
         frame(&mut ui, &mut device, &mut advanced, &mut heights);
+        assert!(!ui.drawn.contains_key(&id_of("pad-ff-steering")));
+        assert!(!ui.drawn.contains_key(&id_of("pad-ff-vibration")));
         for key in SIMPLE_FEEDBACK_KEYS { assert!(ui.drawn.contains_key(&id_of(key)), "{key}"); }
         assert!(!ui.drawn.contains_key(&id_of("ffb_rolling_radius_filter_time")));
         click_id(&mut ui, id_of("pad-ff-view") ^ 12, &mut device, &mut advanced, &mut heights);
@@ -2482,6 +2490,10 @@ mod device_feedback_tests {
         for p in core::ffb::CHOICES { assert!(ui.drawn.contains_key(&id_of(p.key)), "{}", p.key); }
         for (key, _, _) in core::ffb::SWITCHES { assert!(ui.drawn.contains_key(&id_of(key)), "{key}"); }
         assert!(ui.drawn.contains_key(&id_of("ffb-preset-reset")));
+        assert!(click_id(&mut ui, id_of("pad-ff-mode") ^ 11, &mut device, &mut advanced, &mut heights));
+        frame(&mut ui, &mut device, &mut advanced, &mut heights);
+        assert!(ui.drawn.contains_key(&id_of("pad-ff-steering")));
+        assert!(ui.drawn.contains_key(&id_of("pad-ff-vibration")));
     }
 
     #[test]

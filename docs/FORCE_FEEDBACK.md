@@ -6,16 +6,16 @@ The native wheel feedback includes a Rust port of the force model in
 telemetry feedback is an opt-in experiment until it has been tested on more
 wheels and at typical low VR frame rates.
 
-In **Settings → Driving**, leave **Force feedback and vibration** on. Choose
-**Legacy** or **Telemetry** on each device's **Force feedback** tab. The global
-`ff_telemetry` setting is a fallback for devices without a saved mode; `1`
-means telemetry and `0` means the previous openOMSI model.
+In **Controls → Game controllers**, select a device and open its **Force feedback**
+tab. Switch **Force feedback and vibration** on for that device, then choose
+**Legacy** or **Telemetry**. Existing global `ff_enabled` and `ff_telemetry` values
+remain fallbacks for devices without saved values.
 
 Set **Wheel rotation** to the physical rotation configured in your wheel driver.
-Select your wheel under **Controls → Game controllers → device → Force feedback**
-to adjust **Steering force** and **Vibration**. These are the existing `[FFScale]`
-values, and they apply to both feedback models. A saved zero mutes that channel,
-including when imported from OMSI's `Inputs/gamectrler.cfg`.
+In Legacy mode, adjust **Steering force** and **Vibration** using the existing
+`[FFScale]` values. A saved zero mutes that legacy channel, including when imported
+from OMSI's `Inputs/gamectrler.cfg`. Telemetry has its own gain and strength controls;
+the legacy sliders are hidden and do not multiply telemetry output.
 **Invert force feedback** still reverses the final wheel force. The port uses
 openOMSI's steering coordinates; the plugin's hardware-specific
 `force_direction` and `resistance_direction` defaults are normalized to these
@@ -52,8 +52,8 @@ Each device can retain an independent advanced profile.
 ## Tuning in openOMSI
 
 Open **Controls → Game controllers**, select a device, then its **Force feedback**
-tab. Choose Legacy or Telemetry. Both modes keep the familiar Steering force
-and Vibration sliders and the per-device direction switch. Telemetry offers a
+tab. Choose Legacy or Telemetry. Both modes have a per-device enable and direction
+switch. Legacy keeps the familiar Steering force and Vibration sliders. Telemetry offers a
 **Simple** panel with 13 key strengths and limits: overall gain, output and
 base-torque limits, centring at rest and speed, steering response, damping and
 friction at rest and speed, road kicks, impact strength and surface vibration.
@@ -73,7 +73,7 @@ Turning off **Software damping** or **Software friction** disables that componen
 it does not select a native driver condition effect.
 
 The device mode is stored in an `[openOMSI.FFMode]` section (`0` Legacy, `1`
-Telemetry). Values are stored in the content folder's `Inputs/gamectrler.cfg`, in an
+Telemetry); its enable switch is stored in `[openOMSI.FFEnabled]`. Values are stored in the content folder's `Inputs/gamectrler.cfg`, in an
 `[openomsi_ffb]` block within each device's `[ctrl]` entry. Keys use `ffb_` before
 the original plugin parameter name, for example:
 
@@ -96,8 +96,8 @@ The shared defaults and full key/range list are in
 
 For migration from the earlier build, devices without a saved profile use the old
 `ffb_*` values in `~/.openomsi/settings.cfg` (or the plugin defaults when absent).
-Existing device profiles keep precedence. `[FFScale]` remains the simple per-device
-control for either model; zero values are not replaced with defaults.
+Existing device profiles keep precedence. `[FFScale]` remains saved for Legacy
+when switching modes; zero values are not replaced with defaults.
 
 ## Differences and limits
 
@@ -120,7 +120,7 @@ previous hardware periodic effect. The model resets after a frame gap over
 300 ms. Device effects expire after 300 ms without refresh, and stopping feedback
 bypasses normal output throttling. Pause, focus loss and controller changes reset
 the model. Gamepads apply their own profile's overall gain and output limit to
-rumble, also scaled by the saved Vibration value; steering-specific effects need a force-feedback wheel. macOS gains no
+rumble; Legacy also uses the saved Vibration value. Steering-specific effects need a force-feedback wheel. macOS gains no
 native wheel-torque backend from this change.
 
 Native DirectInput condition/periodic effect fallbacks, the plugin's device and

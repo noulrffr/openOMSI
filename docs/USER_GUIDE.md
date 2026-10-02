@@ -160,7 +160,9 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   model uses speed-sensitive centring, wheel-motion
   damping and friction, braking and grip feedback, front-wheel bumps and script shaking
   (`FF_Vib_Amp`). Select your device, then its **Force feedback** tab to choose
-  Legacy or Telemetry and adjust Steering force and Vibration for either model.
+  Legacy or Telemetry. The device's Force feedback and vibration switch enables its
+  output, and Invert force feedback changes its direction. Legacy has Steering force
+  and Vibration sliders; Telemetry uses its own tuning instead.
   Telemetry has a Simple panel for key strengths and limits and an Advanced panel
   with the full tuning set. Press **Save**;
   changes apply when a new game starts. See [Force feedback](FORCE_FEEDBACK.md) for details.
@@ -169,10 +171,10 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   keys even when the wheel is centered. A wheel that a community controller mapping also
   makes a gamepad (a Logitech G29) is listed once, and *Use this device* switches any device off
   (it is then neither read nor listed as steering). The device's **Axes and buttons** tab
-  manages bindings; **Force feedback** keeps the familiar Steering force and Vibration sliders.
+  manages bindings; **Force feedback** keeps the familiar Steering force and Vibration sliders in Legacy mode.
   The values are stored
   for that device in the content folder's `Inputs/gamectrler.cfg`; restart a running game to use
-  the new values. *Force feedback and vibration* in Settings → Driving remains the global on/off switch.
+  the new values. Older global force-feedback settings are used only for devices without saved per-device values.
 * **Sessions** - every game started from the launcher, with its log, a **Stop** that lets
   it save its run (SIGTERM, up to 8 s, and only a stuck game is killed) and, for a LAN
   session, the code to copy, who is playing and the chat.

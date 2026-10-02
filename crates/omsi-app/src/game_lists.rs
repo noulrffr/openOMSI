@@ -1716,8 +1716,6 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "steering_linear", "Steering linearity (keys at OMSI's steady pace)", "Keyboard steering at OMSI's steady pace"),
         switch_row(app, "old_steering", "Old Steering (the wheel stays, turn it back yourself)", "The wheel stays where the keys left it"),
         switch_row(app, "red_steer_spd", "Dynamic steering (slower keys at speed, OMSI's redSteerSpd)", "The steering keys act slower at speed"),
-        switch_row(app, "ff", "Force feedback and vibration", "Enable force feedback for the steering wheel and vibration for controllers"),
-        switch_row(app, "ff_invert", "Invert force feedback by default", "For wheels without a saved direction"),
         slider_row(app, "wheel_range", "Wheel rotation", "The steering wheel's own rotation, lock to lock", &|v| format!("{v:.0}°")),
         slider_row(app, "wheel_lock", "Full lock at", "How far the wheel turns for the vehicle's full lock", &|v| if v < 45.0 { "OMSI".to_string() } else { format!("{v:.0}°") }),
         slider_row(app, "pedal_t", "Throttle pedal strength", "Adjust how strongly pedal input affects the throttle", &|v| format!("x{v}")),
