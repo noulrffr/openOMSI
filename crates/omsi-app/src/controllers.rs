@@ -66,6 +66,8 @@ pub(crate) struct DeviceCfg {
     pub(crate) ff_scale: Option<(f32, f32)>,
     /// Motor polarity for this device; None uses the existing global setting.
     pub(crate) ff_invert: Option<bool>,
+    /// Feedback model for this device; None uses the existing global setting.
+    pub(crate) ff_telemetry: Option<bool>,
     /// The native telemetry model's tuning for this device. None imports the old global preset.
     pub(crate) ffb: Option<FeedbackSettings>,
 }
@@ -81,14 +83,18 @@ fn feedback_scales(cfg: Option<&DeviceCfg>) -> (f32, f32) {
     cfg.and_then(|d| d.ff_scale).unwrap_or((1.0, 1.0))
 }
 
+fn feedback_mode(cfg: Option<&DeviceCfg>, default: bool) -> bool {
+    cfg.and_then(|d| d.ff_telemetry).unwrap_or(default)
+}
+
 fn device_feedback(cfg: &[DeviceCfg], name: &str, defaults: FeedbackSettings) -> FeedbackSettings {
     find_device_cfg(cfg, name).map(|d| d.feedback_settings(defaults)).unwrap_or(defaults)
 }
 
 /// Gamepads cannot generate steering torque, but honor their own master gain and limit.
-fn rumble_magnitude(cfg: &[DeviceCfg], name: &str, defaults: FeedbackSettings, telemetry: bool, amplitude: f32) -> u16 {
+fn rumble_magnitude(cfg: &[DeviceCfg], name: &str, defaults: FeedbackSettings, default_telemetry: bool, amplitude: f32) -> u16 {
     let device = find_device_cfg(cfg, name);
-    let strength = if telemetry {
+    let strength = if feedback_mode(device, default_telemetry) {
         let settings = device.map(|d| d.feedback_settings(defaults)).unwrap_or(defaults).validated();
         amplitude.clamp(0.0, settings.output_limit) * settings.overall_gain * feedback_scales(device).1.clamp(0.0, 2.0)
     } else { amplitude * feedback_scales(device).1.clamp(0.0, 2.0) };
@@ -151,6 +157,12 @@ pub(crate) fn parse_cfg(text: &str) -> Vec<DeviceCfg> {
                 }
                 i += 2;
             }
+            "[openOMSI.FFMode]" => {
+                if let Some(d) = out.last_mut() {
+                    d.ff_telemetry = lines.get(i + 1).and_then(|v| match *v { "0" => Some(false), "1" => Some(true), _ => None });
+                }
+                i += 2;
+            }
             "[openomsi_ffb]" => {
                 let start = i + 1;
                 i = start;
@@ -185,6 +197,9 @@ pub(crate) fn cfg_text(devices: &[DeviceCfg]) -> String {
         t.push_str(&format!("\r\n[FFScale]\r\n{a:.3}\r\n{b:.3}\r\n\r\n"));
         if let Some(invert) = d.ff_invert {
             t.push_str(&format!("[openOMSI.FFInvert]\r\n{}\r\n\r\n", invert as u8));
+        }
+        if let Some(telemetry) = d.ff_telemetry {
+            t.push_str(&format!("[openOMSI.FFMode]\r\n{}\r\n\r\n", telemetry as u8));
         }
         if let Some(settings) = d.ffb {
             t.push_str("[openomsi_ffb]\r\n");
@@ -834,12 +849,13 @@ impl Controllers {
     /// lateral motion, front-wheel bumps and script-driven vibration. Other devices
     /// get vibration as rumble.
     pub fn feedback(&mut self, f: FfInput) {
+        let telemetry = feedback_mode(self.steer.as_ref().and_then(|s| find_device_cfg(&self.cfg, &s.0)), self.ff_telemetry);
         let settings = self.steer.as_ref().map(|s| device_feedback(&self.cfg, &s.0, self.ffb_defaults)).unwrap_or(self.ffb_defaults);
         self.ff_model.configure(settings);
         let on = self.focused && self.enabled && f.on && self.ff_enabled;
-        if !on || self.ff_model_enabled != self.ff_telemetry {
+        if !on || self.ff_model_enabled != telemetry {
             self.ff_model.reset();
-            self.ff_model_enabled = self.ff_telemetry;
+            self.ff_model_enabled = telemetry;
         }
         let mut f = f;
         if on {
@@ -876,7 +892,7 @@ impl Controllers {
         if let (Some((name, x, x0, true)), Some(di)) = (self.steer.clone(), self.devices.di.as_mut()) {
             let cfg = find_device_cfg(&self.cfg, &name);
             let (k_s, k_e) = feedback_scales(cfg);
-            let f = if self.ff_telemetry {
+            let f = if telemetry {
                 di.set_vibration(&name, 0.0, f.vib_period);
                 f
             } else {
@@ -884,7 +900,7 @@ impl Controllers {
                 let vib_amp = if on { f.vib_amp.clamp(0.0, 1.0) * VIB_SHARE * k_e.clamp(0.0, 2.0) } else { 0.0 };
                 if di.set_vibration(&name, vib_amp, f.vib_period) { FfInput { vib_amp: 0.0, ..f } } else { f }
             };
-            let force = if !on { 0.0 } else if self.ff_telemetry {
+            let force = if !on { 0.0 } else if telemetry {
                 self.ff_model.update(&f.telemetry, x, self.wheel_degrees, f.dt, k_s, k_e)
             } else { wheel_force(&f, x, x0, &mut self.ff_t, k_s, k_e) };
             // The wheel force is calculated from the steering axis after its configured
@@ -907,7 +923,7 @@ impl Controllers {
             if let Some(w) = self.wheel.as_mut() {
                 let cfg = find_device_cfg(&self.cfg, &name);
                 let (k_s, k_e) = feedback_scales(cfg);
-                let force = if !on { 0.0 } else if self.ff_telemetry {
+                let force = if !on { 0.0 } else if telemetry {
                     self.ff_model.update(&f.telemetry, x, self.wheel_degrees, f.dt, k_s, k_e)
                 } else { wheel_force(&f, x, x0, &mut self.ff_t, k_s, k_e) };
                 let axis_reversed = calibrated_steering_reversed(cfg);
@@ -1422,21 +1438,32 @@ mod cfg_tests {
         for p in PARAMETERS { values[p.key] = serde_json::json!(p.max); }
         for c in CHOICES { values[c.key] = serde_json::json!(c.options.last().unwrap().0); }
         for (key, _, _) in SWITCHES { values[*key] = serde_json::json!(false); }
-        let mut first = DeviceCfg { name: "Wheel A".into(), second: "7".into(), ff_scale: Some((0.0, 0.0)),
+        let mut first = DeviceCfg { name: "Wheel A".into(), second: "7".into(), ff_scale: Some((0.0, 0.0)), ff_telemetry: Some(true),
             ffb: Some(FeedbackSettings::from_json(&values)), buttons: vec![("horn".into(), "3".into())], ..Default::default() };
         first.axes[0] = Some((Func::Steering, true));
         first.axis_flags[0] = 8;
-        let second = DeviceCfg { name: "Wheel B".into(), second: "0".into(), ff_scale: Some((1.0, 1.0)),
+        let second = DeviceCfg { name: "Wheel B".into(), second: "0".into(), ff_scale: Some((1.0, 1.0)), ff_telemetry: Some(false),
             ffb: Some(FeedbackSettings { overall_gain: 0.23, ..Default::default() }), ..Default::default() };
         let devices = vec![first, second];
         let text = cfg_text(&devices);
         assert_eq!(text.matches("[openomsi_ffb]").count(), 2);
+        assert_eq!(text.matches("[openOMSI.FFMode]").count(), 2);
         assert_eq!(parse_cfg(&text), devices);
         let partial = parse_cfg("[ctrl]\nA\n0\n[openomsi_ffb]\nffb_overall_gain=0.2\nffb_output_limit=NaN\n[ctrl]\nB\n0\n[axis]\n0\n1\n");
         assert_eq!(partial[0].ffb.unwrap().overall_gain, 0.2);
         assert_eq!(partial[0].ffb.unwrap().output_limit, 1.0);
         assert_eq!(partial[1].ffb, None);
         assert_eq!(partial[1].axes[0], Some((Func::Steering, true)));
+    }
+
+    #[test]
+    fn device_mode_overrides_the_global_fallback() {
+        let legacy = super::DeviceCfg { ff_telemetry: Some(false), ..Default::default() };
+        let telemetry = super::DeviceCfg { ff_telemetry: Some(true), ..Default::default() };
+        assert!(!super::feedback_mode(Some(&legacy), true));
+        assert!(super::feedback_mode(Some(&telemetry), false));
+        assert!(super::feedback_mode(None, true));
+        assert!(!super::feedback_mode(None, false));
     }
 
     #[test]

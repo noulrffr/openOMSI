@@ -159,9 +159,10 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   The previous openOMSI model remains the default. The optional *Telemetry force feedback*
   model uses speed-sensitive centring, wheel-motion
   damping and friction, braking and grip feedback, front-wheel bumps and script shaking
-  (`FF_Vib_Amp`). Enable it in Settings → Driving to compare the two models.
-  Select your device, then its **Force feedback** tab to adjust Steering force and
-  Vibration for either model. Advanced telemetry parameters remain in the config file. Press **Save**;
+  (`FF_Vib_Amp`). Select your device, then its **Force feedback** tab to choose
+  Legacy or Telemetry and adjust Steering force and Vibration for either model.
+  Telemetry has a Simple panel for key strengths and limits and an Advanced panel
+  with the full tuning set. Press **Save**;
   changes apply when a new game starts. See [Force feedback](FORCE_FEEDBACK.md) for details.
   A wheel nobody has set up steers with
   its X axis. While a wheel supplies steering, its position takes priority over steering

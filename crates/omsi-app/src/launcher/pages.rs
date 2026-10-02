@@ -42,6 +42,8 @@ pub struct PadsView {
     pub devices: Option<Vec<crate::controllers::DeviceCfg>>,
     pub selected: usize,
     pub detail_tab: usize,
+    pub ffb_advanced: bool,
+    pub ffb_heights: [f32; 2],
     /// Waiting for a button of the shown device to be pressed (to add its binding).
     pub capturing: bool,
     /// A button found through "Add a button", kept visible even past the highlight.
@@ -433,18 +435,118 @@ fn settings_tab(ui: &mut Ui, tab: usize, s: &mut Value, dirty: &mut f32, out: &m
     }
 }
 
-/// The two saved FFScale values control both feedback models on this device.
-fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg, body: Rect) -> bool {
-    let (mut steering, mut vibration) = device.ff_scale.unwrap_or((1.0, 1.0));
+/// The two FFScale values stay visible in either mode; telemetry tuning has two views.
+fn device_force_feedback(ui: &mut Ui, device: &mut crate::controllers::DeviceCfg, defaults: core::ffb::Settings, default_telemetry: bool, body: Rect, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
+    let mut mode = usize::from(device.ff_telemetry.unwrap_or(default_telemetry));
     let mut changed = false;
-    if ui.slider("pad-ff-steering", Rect::new(body.x, body.y, body.w, ROW), &mut steering, 0.0, 2.0, 0.05, "Steering force", &|v| format!("{:.0}%", v * 100.0)) {
+    if ui.segmented("pad-ff-mode", Rect::new(body.x, body.y, body.w.min(460.0), 34.0), &mut mode, &["Legacy", "Telemetry"]) {
+        device.ff_telemetry = Some(mode == 1);
         changed = true;
     }
-    if ui.slider("pad-ff-vibration", Rect::new(body.x, body.y + ROW + 6.0, body.w, ROW), &mut vibration, 0.0, 2.0, 0.05, "Vibration", &|v| format!("{:.0}%", v * 100.0)) {
+    let (mut steering, mut vibration) = device.ff_scale.unwrap_or((1.0, 1.0));
+    let scale_y = body.y + 46.0;
+    let mut scale_changed = false;
+    if ui.slider("pad-ff-steering", Rect::new(body.x, scale_y, body.w, ROW), &mut steering, 0.0, 2.0, 0.05, "Steering force", &|v| format!("{:.0}%", v * 100.0)) {
+        scale_changed = true;
+    }
+    if ui.slider("pad-ff-vibration", Rect::new(body.x, scale_y + ROW + 6.0, body.w, ROW), &mut vibration, 0.0, 2.0, 0.05, "Vibration", &|v| format!("{:.0}%", v * 100.0)) {
+        scale_changed = true;
+    }
+    if scale_changed {
+        device.ff_scale = Some((steering, vibration));
         changed = true;
     }
-    if changed { device.ff_scale = Some((steering, vibration)); }
+    if mode == 0 { return changed; }
+
+    let mut view = usize::from(*advanced);
+    let view_y = scale_y + ROW * 2.0 + 20.0;
+    if ui.segmented("pad-ff-view", Rect::new(body.x, view_y, body.w.min(460.0), 34.0), &mut view, &["Simple", "Advanced"]) {
+        *advanced = view == 1;
+    }
+    let mut values = json!({});
+    device.ffb.unwrap_or(defaults).write_json(&mut values);
+    let mut tuning_changed = false;
+    let list = Rect::new(body.x, view_y + 42.0, body.w, (body.bottom() - view_y - 42.0).max(0.0));
+    if *advanced {
+        ui.scroll_area(&format!("pad-ffb-advanced-{}", device.name), list, &mut |ui, v| {
+            let width = v.w - 10.0;
+            let cols = if width < 900.0 {
+                [Rect::new(v.x, v.y, width, heights[0]), Rect::new(v.x, v.y + heights[0] + GAP, width, heights[1])]
+            } else {
+                let w = (width - GAP) * 0.5;
+                let h = v.h.max(heights[0]).max(heights[1]);
+                [Rect::new(v.x, v.y, w, h), Rect::new(v.x + w + GAP, v.y, w, h)]
+            };
+            *heights = advanced_feedback_controls(ui, &mut values, &mut tuning_changed, cols);
+            if width < 900.0 { heights[0] + heights[1] + GAP } else { heights[0].max(heights[1]) }
+        });
+    } else {
+        ui.scroll_area(&format!("pad-ffb-simple-{}", device.name), list, &mut |ui, v| {
+            let mut c = Col::new(ui, Rect::new(v.x, v.y, v.w - 10.0, v.h.max(heights[0])), "Telemetry");
+            for key in SIMPLE_FEEDBACK_KEYS {
+                let p = core::ffb::PARAMETERS.iter().find(|p| p.key == *key).expect("simple parameter exists");
+                feedback_parameter(ui, &mut values, &mut tuning_changed, c.row(), p);
+            }
+            heights[0] = c.used();
+            heights[0]
+        });
+    }
+    if tuning_changed {
+        device.ffb = Some(core::ffb::Settings::from_json(&values));
+        changed = true;
+    }
     changed
+}
+
+const SIMPLE_FEEDBACK_KEYS: &[&str] = &[
+    "ffb_overall_gain", "ffb_output_limit", "ffb_model_force_limit",
+    "ffb_align_at_rest", "ffb_align_at_speed", "ffb_steering_response_exponent",
+    "ffb_damper_at_rest", "ffb_damper_at_speed", "ffb_friction_at_rest",
+    "ffb_friction_at_speed", "ffb_road_kick_gain", "ffb_impact_rumble_limit",
+    "ffb_surface_rumble_gain",
+];
+
+fn feedback_parameter(ui: &mut Ui, s: &mut Value, changed: &mut bool, row: Rect, p: &core::ffb::Parameter) {
+    let mut value = get(s, p.key).as_f64().unwrap_or(p.default as f64) as f32;
+    let precision = if p.step < 0.01 { 3 } else if p.step < 0.1 { 2 } else { 1 };
+    if ui.slider(p.key, row, &mut value, p.min, p.max, p.step, p.label, &|v| format!("{v:.precision$}")) {
+        s[p.key] = json!(value);
+        *changed = true;
+    }
+}
+
+fn advanced_feedback_controls(ui: &mut Ui, s: &mut Value, changed: &mut bool, cols: [Rect; 2]) -> [f32; 2] {
+    use core::ffb::{Settings, PARAMETERS, CHOICES, SWITCHES, GROUPS};
+    let mut heights = [0.0; 2];
+    for column in 0..2 {
+        let first = column * 4;
+        let mut c = Col::new(ui, cols[column], GROUPS[first]);
+        if column == 0 && ui.button("ffb-preset-reset", c.row(), "Restore plugin tuning", Some("restart_alt"), ButtonKind::Normal) {
+            Settings::default().write_json(s);
+            *changed = true;
+        }
+        for group in first..first + 4 {
+            if group != first { c.section(ui, GROUPS[group]); }
+            for (key, label, _) in SWITCHES.iter().filter(|(_, _, g)| *g == group) {
+                let mut value = get(s, key).as_bool().unwrap_or(true);
+                if ui.toggle(key, c.row(), &mut value, label) {
+                    s[*key] = json!(value);
+                    *changed = true;
+                }
+            }
+            for choice in CHOICES.iter().filter(|p| p.group == group) {
+                let mut dirty = 0.0;
+                sel_setting(ui, s, &mut dirty, choice.key, c.row(), choice.label, choice.key, choice.options);
+                *changed |= dirty > 0.0;
+            }
+            for p in PARAMETERS.iter().filter(|p| p.group == group) {
+                feedback_parameter(ui, s, changed, c.row(), p);
+            }
+        }
+        heights[column] = c.used();
+    }
+    if *changed { Settings::from_json(s).write_json(s); }
+    heights
 }
 
 /// The saved graphics profiles' part of the Graphics tab: the list, the name being typed.
@@ -658,7 +760,6 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
     toggle_setting(ui, s, dirty, c.row(), "Force feedback and vibration", "ff_enabled");
     toggle_setting(ui, s, dirty, c.row(), "Invert force feedback by default", "ff_invert");
     c.y += ui.paragraph("Wheels with a saved direction use their own setting under Controls → Game controllers.", Vec2::new(c.inner.x, c.y), c.inner.w, 12.5, Weight::Regular, TEXT_DIM) + 8.0;
-    toggle_setting(ui, s, dirty, c.row(), "Telemetry force feedback", "ff_telemetry");
     if ui.button("s-wreset", c.row(), "Reset wheel settings", Some("restart_alt"), ButtonKind::Normal) {
         s["wheel_range"] = json!(900.0);
         s["wheel_lock"] = json!(0.0);
@@ -1164,6 +1265,8 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     if sel != pv.selected {
         release_feedback(&mut pv.io, &mut pv.feedback_test);
         pv.selected = sel;
+        pv.ffb_advanced = false;
+        pv.ffb_heights = [0.0; 2];
         pv.capturing = false;
         pv.revealed_button = None;
         pv.wizard = None;
@@ -1172,6 +1275,8 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         devices.push(DeviceCfg { name, second: "0".into(), ..Default::default() });
         pv.selected = devices.len() - 1;
         pv.detail_tab = 0;
+        pv.ffb_advanced = false;
+        pv.ffb_heights = [0.0; 2];
         pv.revealed_button = None;
         pv.dirty = true;
         // a new device starts with the assistant
@@ -1262,7 +1367,9 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
             inner.y += 44.0;
             inner.h = (inner.h - 44.0).max(0.0);
         }
-        if device_force_feedback(&mut l.ui, d, inner) { pv.dirty = true; }
+        let defaults = core::ffb::Settings::from_json(&l.state.settings);
+        let default_telemetry = l.state.settings.get("ff_telemetry").and_then(Value::as_bool).unwrap_or(false);
+        if device_force_feedback(&mut l.ui, d, defaults, default_telemetry, inner, &mut pv.ffb_advanced, &mut pv.ffb_heights) { pv.dirty = true; }
         return;
     }
     const AXES: [&str; 8] = ["X axis", "Y axis", "Z axis", "X rotation", "Y rotation", "Z rotation", "Slider 1", "Slider 2"];
@@ -2235,7 +2342,7 @@ mod settings_tests {
         }
         let driving = vec![
             "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-brake_hold", "set-auto_clutch", "set-momentary_gears", "s-go-keys",
-            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "set-ff_telemetry", "s-wreset", "s-go-pads",
+            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-wreset", "s-go-pads",
         ];
         let mut camera = vec![
             "s-seaty", "s-seatz", "s-seatx", "s-seatreset", "s-fov", "set-steer_look", "s-steer-look-angle", "s-steer-look-response", "set-head_movement", "set-driverview_smooth", "set-hands_in_cab", "set-alt_view",
@@ -2333,34 +2440,48 @@ mod device_feedback_tests {
     use super::*;
     use crate::controllers::{DeviceCfg, Func};
 
-    fn frame(ui: &mut Ui, device: &mut DeviceCfg) -> bool {
+    fn frame(ui: &mut Ui, device: &mut DeviceCfg, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
         ui.begin(Vec2::new(1200.0, 2200.0), 1.0, 1.0 / 60.0);
-        device_force_feedback(ui, device, Rect::new(0.0, 0.0, 1180.0, 2100.0))
+        device_force_feedback(ui, device, core::ffb::Settings::default(), false, Rect::new(0.0, 0.0, 1180.0, 2100.0), advanced, heights)
     }
 
-    fn click(ui: &mut Ui, name: &str, device: &mut DeviceCfg) -> bool {
-        frame(ui, device);
-        ui.input.mouse = ui.drawn[&id_of(name)].center();
+    fn click_id(ui: &mut Ui, id: u64, device: &mut DeviceCfg, advanced: &mut bool, heights: &mut [f32; 2]) -> bool {
+        frame(ui, device, advanced, heights);
+        ui.input.mouse = ui.drawn[&id].center();
         ui.input.pressed = true;
         ui.input.down = true;
-        let down_changed = frame(ui, device);
+        let down_changed = frame(ui, device, advanced, heights);
         ui.input.pressed = false;
         ui.input.down = false;
         ui.input.released = true;
-        let up_changed = frame(ui, device);
+        let up_changed = frame(ui, device, advanced, heights);
         ui.input.released = false;
         down_changed || up_changed
     }
 
     #[test]
-    fn feedback_tab_has_only_the_two_familiar_sliders() {
+    fn legacy_mode_keeps_both_scales_and_telemetry_has_simple_and_advanced_views() {
         assert!(!SETTINGS_TABS.contains(&"Force feedback"));
         let mut ui = Ui::new();
         let mut device = DeviceCfg::default();
-        assert!(!frame(&mut ui, &mut device));
+        let mut advanced = false;
+        let mut heights = [0.0; 2];
+        assert!(!frame(&mut ui, &mut device, &mut advanced, &mut heights));
         assert!(ui.drawn.contains_key(&id_of("pad-ff-steering")));
         assert!(ui.drawn.contains_key(&id_of("pad-ff-vibration")));
-        assert_eq!(ui.drawn.len(), 2);
+        assert!(!ui.drawn.contains_key(&id_of("ffb_overall_gain")));
+        assert!(click_id(&mut ui, id_of("pad-ff-mode") ^ 12, &mut device, &mut advanced, &mut heights));
+        assert_eq!(device.ff_telemetry, Some(true));
+        frame(&mut ui, &mut device, &mut advanced, &mut heights);
+        for key in SIMPLE_FEEDBACK_KEYS { assert!(ui.drawn.contains_key(&id_of(key)), "{key}"); }
+        assert!(!ui.drawn.contains_key(&id_of("ffb_rolling_radius_filter_time")));
+        click_id(&mut ui, id_of("pad-ff-view") ^ 12, &mut device, &mut advanced, &mut heights);
+        assert!(advanced);
+        frame(&mut ui, &mut device, &mut advanced, &mut heights);
+        for p in core::ffb::PARAMETERS { assert!(ui.drawn.contains_key(&id_of(p.key)), "{}", p.key); }
+        for p in core::ffb::CHOICES { assert!(ui.drawn.contains_key(&id_of(p.key)), "{}", p.key); }
+        for (key, _, _) in core::ffb::SWITCHES { assert!(ui.drawn.contains_key(&id_of(key)), "{key}"); }
+        assert!(ui.drawn.contains_key(&id_of("ffb-preset-reset")));
     }
 
     #[test]
@@ -2371,9 +2492,15 @@ mod device_feedback_tests {
         first.axes[0] = Some((Func::Steering, true));
         let second = DeviceCfg { name: "Wheel B".into(), second: "0".into(), ff_scale: Some((1.5, 0.25)), ..Default::default() };
         let mut ui = Ui::new();
-        assert!(click(&mut ui, "pad-ff-steering", &mut first));
+        let mut advanced = false;
+        let mut heights = [0.0; 2];
+        assert!(click_id(&mut ui, id_of("pad-ff-steering"), &mut first, &mut advanced, &mut heights));
         assert_eq!(first.ff_scale.unwrap().1, 0.0);
         assert_eq!(first.ffb, Some(profile));
+        first.ff_telemetry = Some(true);
+        assert!(click_id(&mut ui, id_of("ffb_align_at_speed"), &mut first, &mut advanced, &mut heights));
+        assert_ne!(first.ffb.unwrap().align_at_speed, profile.align_at_speed);
+        assert_eq!(first.ffb.unwrap().overall_gain, profile.overall_gain);
         assert_eq!(first.axes[0], Some((Func::Steering, true)));
         assert_eq!(first.buttons, vec![("horn".into(), "0".into())]);
         let loaded = crate::controllers::parse_cfg(&crate::controllers::cfg_text(&[first.clone(), second.clone()]));
@@ -2384,7 +2511,7 @@ mod device_feedback_tests {
     fn untouched_device_keeps_its_inherited_scales() {
         let mut ui = Ui::new();
         let mut device = DeviceCfg { name: "Older wheel".into(), ff_scale: Some((0.0, 0.0)), ..Default::default() };
-        assert!(!frame(&mut ui, &mut device));
+        assert!(!frame(&mut ui, &mut device, &mut false, &mut [0.0; 2]));
         assert_eq!(device.ff_scale, Some((0.0, 0.0)));
         assert_eq!(device.ffb, None);
     }

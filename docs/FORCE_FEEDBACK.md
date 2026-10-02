@@ -6,10 +6,10 @@ The native wheel feedback includes a Rust port of the force model in
 telemetry feedback is an opt-in experiment until it has been tested on more
 wheels and at typical low VR frame rates.
 
-In **Settings → Driving**, leave **Force feedback and vibration** on. Enable
-**Telemetry force feedback** to try the new model; switch it off to use the
-previous openOMSI model. The saved setting is `ff_telemetry=1`
-(ported model) or `ff_telemetry=0` (previous model).
+In **Settings → Driving**, leave **Force feedback and vibration** on. Choose
+**Legacy** or **Telemetry** on each device's **Force feedback** tab. The global
+`ff_telemetry` setting is a fallback for devices without a saved mode; `1`
+means telemetry and `0` means the previous openOMSI model.
 
 Set **Wheel rotation** to the physical rotation configured in your wheel driver.
 Select your wheel under **Controls → Game controllers → device → Force feedback**
@@ -19,7 +19,7 @@ including when imported from OMSI's `Inputs/gamectrler.cfg`.
 **Invert force feedback** still reverses the final wheel force. The port uses
 openOMSI's steering coordinates; the plugin's hardware-specific
 `force_direction` and `resistance_direction` defaults are normalized to these
-coordinates. Advanced direction values can still be set in the device config file.
+coordinates. Advanced direction values can be changed on the Advanced panel.
 The device's **Invert force feedback** switch is on that tab too. The setup
 wizard can detect the direction with a brief motor pulse; its choice is saved
 for that wheel and overrides the global default.
@@ -47,20 +47,24 @@ do not compete for the same device. No OMSI bus files need patching.
 The supplied preset's master gain is **0.8**, with a final output limit of **1**
 before that gain, a base-force slew limit of **2 units/s**, alignment strength
 **0 → 1**, damping **0.053 → 0.257**, and friction **0.14 → 0.063**.
-Each device can retain an independent advanced profile in its config file.
+Each device can retain an independent advanced profile.
 
 ## Tuning in openOMSI
 
 Open **Controls → Game controllers**, select a device, then its **Force feedback**
-tab. It has the two familiar Steering force and Vibration sliders plus the
-per-device direction switch. Press **Save** in the device list, then restart a
+tab. Choose Legacy or Telemetry. Both modes keep the familiar Steering force
+and Vibration sliders and the per-device direction switch. Telemetry offers a
+**Simple** panel with 13 key strengths and limits: overall gain, output and
+base-torque limits, centring at rest and speed, steering response, damping and
+friction at rest and speed, road kicks, impact strength and surface vibration.
+**Advanced** retains the full 74-option tuning, grouped in two columns, plus
+**Restore plugin tuning**. Press **Save** in the device list, then restart a
 running game to use the changes. Saved devices can be adjusted while disconnected.
 
-The detailed model parameters are advanced config-file options rather than
-launcher controls. Existing `[openomsi_ffb]` profiles remain supported and are
-preserved when the two sliders are changed. Devices without a profile use the
-global `ffb_*` defaults from `settings.cfg`; the launcher does not create a
-full profile unless one is already present.
+Existing `[openomsi_ffb]` profiles remain supported and are preserved when
+the mode or two common sliders are changed. Devices without a profile use the
+global `ffb_*` defaults from `settings.cfg` until a Simple or Advanced parameter
+is edited. Switching between Simple and Advanced keeps the same profile values.
 
 Smooth friction gives resistance that rises smoothly around zero wheel speed.
 Stribeck adds stronger breakaway friction at low speed. LuGre also retains a small
@@ -68,7 +72,8 @@ elastic friction force when the wheel stops; its state clears on pause/reset.
 Turning off **Software damping** or **Software friction** disables that component;
 it does not select a native driver condition effect.
 
-Values are stored in the content folder's `Inputs/gamectrler.cfg`, in an
+The device mode is stored in an `[openOMSI.FFMode]` section (`0` Legacy, `1`
+Telemetry). Values are stored in the content folder's `Inputs/gamectrler.cfg`, in an
 `[openomsi_ffb]` block within each device's `[ctrl]` entry. Keys use `ffb_` before
 the original plugin parameter name, for example:
 
