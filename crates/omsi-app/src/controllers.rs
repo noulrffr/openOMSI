@@ -76,9 +76,9 @@ impl DeviceCfg {
     }
 }
 
-/// Legacy FFScale belongs only to the old model; telemetry tuning replaces those multipliers.
-fn feedback_scales(cfg: Option<&DeviceCfg>, telemetry: bool) -> (f32, f32) {
-    if telemetry { (1.0, 1.0) } else { cfg.and_then(|d| d.ff_scale).unwrap_or((1.0, 1.0)) }
+/// The saved per-device steering and vibration multipliers apply to either model.
+fn feedback_scales(cfg: Option<&DeviceCfg>) -> (f32, f32) {
+    cfg.and_then(|d| d.ff_scale).unwrap_or((1.0, 1.0))
 }
 
 fn device_feedback(cfg: &[DeviceCfg], name: &str, defaults: FeedbackSettings) -> FeedbackSettings {
@@ -90,8 +90,8 @@ fn rumble_magnitude(cfg: &[DeviceCfg], name: &str, defaults: FeedbackSettings, t
     let device = find_device_cfg(cfg, name);
     let strength = if telemetry {
         let settings = device.map(|d| d.feedback_settings(defaults)).unwrap_or(defaults).validated();
-        amplitude.clamp(0.0, settings.output_limit) * settings.overall_gain
-    } else { amplitude * feedback_scales(device, false).1.clamp(0.0, 2.0) };
+        amplitude.clamp(0.0, settings.output_limit) * settings.overall_gain * feedback_scales(device).1.clamp(0.0, 2.0)
+    } else { amplitude * feedback_scales(device).1.clamp(0.0, 2.0) };
     (strength.clamp(0.0, 1.0) * u16::MAX as f32) as u16
 }
 
@@ -105,20 +105,7 @@ pub(crate) fn cfg_path(root: &Path) -> std::path::PathBuf {
 pub(crate) fn read_cfg(root: &Path) -> Vec<DeviceCfg> {
     let path = cfg_path(root);
     let Ok(text) = std::fs::read(&path) else { return Vec::new() };
-    let mut devices = parse_cfg(&omsi_cfg::codepage::decode(&text));
-    // An inherited OMSI file can contain 0/0 FFScale on a wheel. Keep its axis and
-    // button bindings, but use openOMSI's 100/100 default until our own file is saved.
-    let original = root.join("Inputs").join("gamectrler.cfg");
-    let from_original = path == original
-        || std::fs::canonicalize(&path).ok().zip(std::fs::canonicalize(&original).ok()).is_some_and(|(a, b)| a == b);
-    if from_original {
-        for d in &mut devices {
-            if d.ff_scale == Some((0.0, 0.0)) {
-                d.ff_scale = None;
-            }
-        }
-    }
-    devices
+    parse_cfg(&omsi_cfg::codepage::decode(&text))
 }
 
 pub(crate) fn parse_cfg(text: &str) -> Vec<DeviceCfg> {
@@ -701,7 +688,7 @@ impl Controllers {
         for c in devices.connected() {
             log::info!("game controller: {} ({})", c.name, if cfg.iter().any(|d| names_match(&d.name, &c.name)) { "set up in gamectrler.cfg" } else if c.gamepad { "as a gamepad" } else { "not set up: its X axis steers" });
         }
-        Controllers { devices, focused: true, cfg, deadzone: 0.0, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), ff_invert: false, ff_enabled: true, ff_telemetry: true, ffb_defaults: Default::default(), wheel_degrees: 900.0, ff_model: Default::default(), ff_model_enabled: true, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_source_logged: None, rumble: Vec::new(), #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
+        Controllers { devices, focused: true, cfg, deadzone: 0.0, pedal_throttle: 1.0, pedal_brake: 1.0, disabled: Vec::new(), ff_invert: false, ff_enabled: true, ff_telemetry: false, ffb_defaults: Default::default(), wheel_degrees: 900.0, ff_model: Default::default(), ff_model_enabled: false, steer_gain: 1.0, enabled: true, actions: Vec::new(), announced: Vec::new(), notice: None, steer: None, ff_t: 0.0, ff_lateral: 0.0, ff_bump: 0.0, ff_bump_age: 0.0, ff_source_logged: None, rumble: Vec::new(), #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel: None, #[cfg(all(target_os = "linux", target_pointer_width = "64"))] wheel_tried: None }
     }
 
     /// A wheel or joystick steers the bus (then the arrow keys look around, as in OMSI:
@@ -877,7 +864,7 @@ impl Controllers {
             self.ff_source_logged = self.steer.as_ref().map(|s| s.0.clone());
             if let Some((name, _, _, effect)) = self.steer.as_ref() {
                 let cfg = find_device_cfg(&self.cfg, name);
-                let (steering, vibration) = feedback_scales(cfg, self.ff_telemetry);
+                let (steering, vibration) = feedback_scales(cfg);
                 #[cfg(windows)]
                 let axis_reversed = self.devices.di.as_ref().is_some_and(|di| force_axis_reversed(cfg, di.force_axis(name)));
                 #[cfg(not(windows))]
@@ -888,7 +875,7 @@ impl Controllers {
         #[cfg(windows)]
         if let (Some((name, x, x0, true)), Some(di)) = (self.steer.clone(), self.devices.di.as_mut()) {
             let cfg = find_device_cfg(&self.cfg, &name);
-            let (k_s, k_e) = feedback_scales(cfg, self.ff_telemetry);
+            let (k_s, k_e) = feedback_scales(cfg);
             let f = if self.ff_telemetry {
                 di.set_vibration(&name, 0.0, f.vib_period);
                 f
@@ -919,7 +906,7 @@ impl Controllers {
             }
             if let Some(w) = self.wheel.as_mut() {
                 let cfg = find_device_cfg(&self.cfg, &name);
-                let (k_s, k_e) = feedback_scales(cfg, self.ff_telemetry);
+                let (k_s, k_e) = feedback_scales(cfg);
                 let force = if !on { 0.0 } else if self.ff_telemetry {
                     self.ff_model.update(&f.telemetry, x, self.wheel_degrees, f.dt, k_s, k_e)
                 } else { wheel_force(&f, x, x0, &mut self.ff_t, k_s, k_e) };
@@ -1453,7 +1440,7 @@ mod cfg_tests {
     }
 
     #[test]
-    fn the_active_device_owns_torque_tuning_and_old_scales_do_not_multiply_it() {
+    fn saved_scales_apply_to_telemetry_torque_and_preserve_zero() {
         use super::*;
         let defaults = FeedbackSettings { overall_gain: 0.7, ..Default::default() };
         let devices = vec![
@@ -1467,14 +1454,14 @@ mod cfg_tests {
         let output = |name| {
             let mut model = crate::force_feedback::ForceFeedback::default();
             model.configure(device_feedback(&devices, name, defaults));
-            let (steering, vibration) = feedback_scales(find_device_cfg(&devices, name), true);
-            assert_eq!((steering, vibration), (1.0, 1.0));
+            let (steering, vibration) = feedback_scales(find_device_cfg(&devices, name));
             let t = crate::force_feedback::Telemetry { steering: [0.3; 2], speed_kmh: 35.0, ..Default::default() };
             (0..200).map(|_| model.update(&t, 0.0, 900.0, 0.02, steering, vibration)).last().unwrap()
         };
         let first = output("Wheel");
-        assert!(first < -0.01);
-        assert!((output("Wheel B") - first * 2.0).abs() < 1e-6);
+        assert_eq!(first, 0.0);
+        assert!(output("Wheel B") < -0.01);
+        assert!(output("Unmigrated") < -0.01);
     }
 
     #[test]
@@ -1484,9 +1471,11 @@ mod cfg_tests {
         let devices = vec![
             DeviceCfg { name: "Pad A".into(), ff_scale: Some((1.0, 2.0)), ffb: Some(FeedbackSettings { overall_gain: 0.0, ..defaults }), ..Default::default() },
             DeviceCfg { name: "Pad B".into(), ff_scale: Some((1.0, 0.0)), ffb: Some(FeedbackSettings { overall_gain: 0.5, output_limit: 0.2, ..defaults }), ..Default::default() },
+            DeviceCfg { name: "Pad C".into(), ff_scale: Some((1.0, 0.5)), ffb: Some(FeedbackSettings { overall_gain: 0.5, output_limit: 0.2, ..defaults }), ..Default::default() },
         ];
         assert_eq!(rumble_magnitude(&devices, "Pad A", defaults, true, 1.0), 0);
-        assert_eq!(rumble_magnitude(&devices, "Pad B", defaults, true, 1.0), (0.1 * u16::MAX as f32) as u16);
+        assert_eq!(rumble_magnitude(&devices, "Pad B", defaults, true, 1.0), 0);
+        assert_eq!(rumble_magnitude(&devices, "Pad C", defaults, true, 1.0), (0.05 * u16::MAX as f32) as u16);
         assert_eq!(rumble_magnitude(&devices, "Pad B", defaults, true, 0.0), 0);
     }
 
@@ -1594,9 +1583,9 @@ mod button_tests {
     }
 
     #[test]
-    fn telemetry_feedback_defaults_on_and_can_be_disabled() {
-        assert!(crate::settings::Settings::from_text("").ff_telemetry);
-        assert!(!crate::settings::Settings::from_text("ff_telemetry=0").ff_telemetry);
+    fn telemetry_feedback_requires_opt_in() {
+        assert!(!crate::settings::Settings::from_text("").ff_telemetry);
+        assert!(crate::settings::Settings::from_text("ff_telemetry=1").ff_telemetry);
     }
 
     #[test]

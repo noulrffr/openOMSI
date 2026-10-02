@@ -2,21 +2,24 @@
 
 The native wheel feedback includes a Rust port of the force model in
 `OMSI2_DirectInput_FFB_Telemetry_Physics_Update.zip`, using the tuning in its
-`OMSI2DirectInputFFB.ini`. It is enabled by default in this build.
+`OMSI2DirectInputFFB.ini`. The previous openOMSI model remains the default;
+telemetry feedback is an opt-in experiment until it has been tested on more
+wheels and at typical low VR frame rates.
 
-In **Settings → Driving → Game controllers**, leave **Force feedback and vibration**
-and **Telemetry force feedback** on. Switch **Telemetry force feedback** off to
-compare with the previous openOMSI model. The saved setting is `ff_telemetry=1`
+In **Settings → Driving**, leave **Force feedback and vibration** on. Enable
+**Telemetry force feedback** to try the new model; switch it off to use the
+previous openOMSI model. The saved setting is `ff_telemetry=1`
 (ported model) or `ff_telemetry=0` (previous model).
 
 Set **Wheel rotation** to the physical rotation configured in your wheel driver.
 Select your wheel under **Controls → Game controllers → device → Force feedback**
-to adjust its own tuning. The old Steering force and Vibration sliders are replaced
-by these controls; their `[FFScale]` values no longer multiply telemetry feedback.
+to adjust **Steering force** and **Vibration**. These are the existing `[FFScale]`
+values, and they apply to both feedback models. A saved zero mutes that channel,
+including when imported from OMSI's `Inputs/gamectrler.cfg`.
 **Invert force feedback** still reverses the final wheel force. The port uses
 openOMSI's steering coordinates; the plugin's hardware-specific
 `force_direction` and `resistance_direction` defaults are normalized to these
-coordinates. Both can be changed separately on the Force feedback tab.
+coordinates. Advanced direction values can still be set in the device config file.
 The device's **Invert force feedback** switch is on that tab too. The setup
 wizard can detect the direction with a brief motor pulse; its choice is saved
 for that wheel and overrides the global default.
@@ -44,30 +47,20 @@ do not compete for the same device. No OMSI bus files need patching.
 The supplied preset's master gain is **0.8**, with a final output limit of **1**
 before that gain, a base-force slew limit of **2 units/s**, alignment strength
 **0 → 1**, damping **0.053 → 0.257**, and friction **0.14 → 0.063**.
-Each device has independent overall gain, centring/resistance and vibration tuning.
+Each device can retain an independent advanced profile in its config file.
 
 ## Tuning in openOMSI
 
 Open **Controls → Game controllers**, select a device, then its **Force feedback**
-tab. **Axes and buttons** stays next to it. The **74 controls** cover:
+tab. It has the two familiar Steering force and Vibration sliders plus the
+per-device direction switch. Press **Save** in the device list, then restart a
+running game to use the changes. Saved devices can be adjusted while disconnected.
 
-| Group | Controls |
-| --- | --- |
-| Output | Master gain, output/base-torque limits, torque slew, base/resistance direction |
-| Centring | Rest/speed strength, speed thresholds, deadband, steering response, angle saturation, tyre onset, response time |
-| Grip and load | Lateral/braking load, wet grip, slip thresholds and force loss, rolling-radius calibration |
-| Damping | Enable software damping, rest/speed strength, force limit, wheel-rate filter/limit, load and fast-movement gains |
-| Friction | Enable software friction, smooth/Stribeck/LuGre model, rest/speed strength, force limit, crossing speed, static ratio, Stribeck speed, viscous gain and LuGre coefficients |
-| Road kicks | Direction, gain/limit, speed weighting, suspension filter, displacement gain and camber decay |
-| Impacts | Vertical/suspension thresholds and gains, minimum/maximum strength, release, frequency/waveform, low-speed weighting and rear-axle rejection |
-| Road vibration | Surface gain/limit, response, frequency range and waveform |
-
-Scroll to reach the lower groups. Press **Save** in the device list, then **restart
-a running game to use the changes**. These controls affect the telemetry model; keep **Telemetry
-force feedback** enabled under Driving. **Restore plugin tuning** restores just
-these 74 values for the selected device to the supplied INI preset. Other devices,
-axis/button bindings and the global feedback switches keep their values. Saved
-devices can be tuned while disconnected.
+The detailed model parameters are advanced config-file options rather than
+launcher controls. Existing `[openomsi_ffb]` profiles remain supported and are
+preserved when the two sliders are changed. Devices without a profile use the
+global `ffb_*` defaults from `settings.cfg`; the launcher does not create a
+full profile unless one is already present.
 
 Smooth friction gives resistance that rises smoothly around zero wheel speed.
 Stribeck adds stronger breakaway friction at low speed. LuGre also retains a small
@@ -92,16 +85,14 @@ ffb_impact_rumble_frequency_hz=12
 
 Edit the file with the launcher closed so its next save does not replace your edits. Invalid numbers
 fall back to defaults; numeric values and conflicting minimum/maximum pairs are
-bounded consistently by the launcher and game. The original plugin INI is not
-loaded automatically. The shared defaults and full key/range list are in
+bounded by the game. The original plugin INI is not loaded automatically.
+The shared defaults and full key/range list are in
 `crates/omsi-launcher-core/src/ffb.rs`.
 
-For migration from the earlier build, devices without a saved profile start from
-the old `ffb_*` values in `~/.openomsi/settings.cfg` (or the plugin defaults when
-absent). Saving controller settings gives each device its own complete profile.
-After that, changes to the old global values do not override those profiles.
-Old `[FFScale]` values remain in the file for compatibility with the previous
-openOMSI feedback model, selected by turning Telemetry force feedback off.
+For migration from the earlier build, devices without a saved profile use the old
+`ffb_*` values in `~/.openomsi/settings.cfg` (or the plugin defaults when absent).
+Existing device profiles keep precedence. `[FFScale]` remains the simple per-device
+control for either model; zero values are not replaced with defaults.
 
 ## Differences and limits
 
@@ -118,12 +109,13 @@ texture cannot reliably distinguish cobblestones from asphalt yet.
 
 Force updates use openOMSI's existing frame-driven Windows DirectInput / Linux
 evdev output, capped at 100 Hz, rather than the plugin's separate 120 Hz worker.
-Vibration frequencies are limited to suit the available sample rate; low FPS can
-therefore change the vibration feel. The model resets after a frame gap over
+Vibration frequencies are limited to suit the available sample rate. At 25 FPS,
+script and impact waves are capped at 10 Hz, so their feel can differ from the
+previous hardware periodic effect. The model resets after a frame gap over
 300 ms. Device effects expire after 300 ms without refresh, and stopping feedback
 bypasses normal output throttling. Pause, focus loss and controller changes reset
 the model. Gamepads apply their own profile's overall gain and output limit to
-rumble; steering-specific effects need a force-feedback wheel. macOS gains no
+rumble, also scaled by the saved Vibration value; steering-specific effects need a force-feedback wheel. macOS gains no
 native wheel-torque backend from this change.
 
 Native DirectInput condition/periodic effect fallbacks, the plugin's device and
@@ -137,10 +129,10 @@ Tests cover a telemetry trace compared with the original C++ model and supplied
 INI, centring direction and saturation, braking/reversing, wet grip, wheel lock-up,
 front/rear impacts, surface texture, raw wheel resistance, output limits,
 invalid/stale frames, telemetry units, all settings saving/reloading, launcher
-controls/reset, nondefault force limits and directions, friction modes, waveform
+controls, nondefault force limits and directions, friction modes, waveform
 selection, and finite output at the tuning range extremes. Device tests cover
-separate profiles, migration defaults, saving/reloading every parameter, binding
-preservation, device-specific torque/rumble and removal of the old multipliers.
+separate profiles, saved zero scales, saving/reloading every parameter, binding
+preservation and device-specific torque/rumble.
 
 ```text
 cargo test --workspace --locked
@@ -148,5 +140,7 @@ cargo build --release --locked
 ```
 
 Wheel-driver polarity, physical feel and device timeout behavior require a real
-wheel test. Compare both modes on the same bus, wheel settings and route: parking,
+wheel test. The telemetry model still needs hands-on 25 FPS VR testing and
+centring checks on DFGT, G29 and G920 wheels before it should become the default.
+Compare both modes on the same bus, wheel settings and route: parking,
 10–35 km/h turns, firm braking, and an isolated front/rear axle bump.

@@ -1064,6 +1064,24 @@ mod tests {
     }
 
     #[test]
+    fn low_vr_frame_rates_keep_script_vibration_bounded_and_mutable() {
+        // FF_Vib_Period=2 requests 50 Hz, above what a frame-driven wheel can
+        // reproduce at 25 or 30 FPS. The limiter must still yield a changing
+        // signal, and a saved zero vibration scale must mute it immediately.
+        let input = Telemetry { script_amplitude: 1.0, script_period: 2.0, ..Default::default() };
+        for fps in [25.0, 30.0] {
+            let mut model = ForceFeedback::default();
+            let samples: Vec<f32> = (0..60)
+                .map(|_| model.update(&input, 0.0, 900.0, 1.0 / fps, 1.0, 1.0))
+                .collect();
+            assert!(samples.iter().all(|f| f.is_finite() && f.abs() <= 0.8));
+            assert!(samples.iter().any(|f| *f > 0.05));
+            assert!(samples.iter().any(|f| *f < -0.05));
+            assert_eq!(model.update(&input, 0.0, 900.0, 1.0 / fps, 1.0, 0.0), 0.0);
+        }
+    }
+
+    #[test]
     fn output_is_bounded_and_channels_scale_independently() {
         let t = Telemetry {
             script_amplitude: 1.0,

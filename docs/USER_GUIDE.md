@@ -155,19 +155,20 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   yet has **Set up**, and **Set up step by step** finds its axes (turn the wheel left, press
   each pedal); every button of the device is listed (press one to jump to it). On Windows the
   devices are read through DirectInput, as OMSI does, so wheels Windows lists can be
-  configured for steering. Force feedback needs a driver that supports constant force:
-  the default *Telemetry force feedback* model uses speed-sensitive centring, wheel-motion
+  configured for steering. Force feedback needs a driver that supports constant force.
+  The previous openOMSI model remains the default. The optional *Telemetry force feedback*
+  model uses speed-sensitive centring, wheel-motion
   damping and friction, braking and grip feedback, front-wheel bumps and script shaking
-  (`FF_Vib_Amp`). Switch it off in Settings → Driving to compare with the previous model.
-  Select your device, then its **Force feedback** tab to tune the 74 plugin parameters.
-  Each device has its own preset and **Restore plugin tuning** button. Press **Save**;
+  (`FF_Vib_Amp`). Enable it in Settings → Driving to compare the two models.
+  Select your device, then its **Force feedback** tab to adjust Steering force and
+  Vibration for either model. Advanced telemetry parameters remain in the config file. Press **Save**;
   changes apply when a new game starts. See [Force feedback](FORCE_FEEDBACK.md) for details.
   A wheel nobody has set up steers with
   its X axis. While a wheel supplies steering, its position takes priority over steering
   keys even when the wheel is centered. A wheel that a community controller mapping also
   makes a gamepad (a Logitech G29) is listed once, and *Use this device* switches any device off
   (it is then neither read nor listed as steering). The device's **Axes and buttons** tab
-  manages bindings; **Force feedback** replaces the old Steering force and Vibration sliders.
+  manages bindings; **Force feedback** keeps the familiar Steering force and Vibration sliders.
   The values are stored
   for that device in the content folder's `Inputs/gamectrler.cfg`; restart a running game to use
   the new values. *Force feedback and vibration* in Settings → Driving remains the global on/off switch.
