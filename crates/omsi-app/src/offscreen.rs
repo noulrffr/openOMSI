@@ -197,7 +197,7 @@ pub(crate) fn run_offscreen(
     let mut service_seconds = 0.0f64;
     let daylight0 = omsi_sim::Daylight::compute(&start_clock(args), envir.as_ref());
     if let Some(p) = player.as_mut() {
-        p.vehicle.set_var("Envir_Brightness", daylight0.brightness);
+        p.vehicle.set_var("Envir_Brightness", daylight0.envir_brightness(world.light_map_light_at(p.vehicle.position)));
         let mut clock = p.vehicle.host.clock.clone();
         let was = clock.time;
         let at_station = at_petrol_station(&world, &p.vehicle);
@@ -278,14 +278,14 @@ pub(crate) fn run_offscreen(
     }
     if let Some(t) = traffic.as_mut() {
         t.day_time = parse_time(&args.time);
-        t.night = omsi_sim::Daylight::compute(
+        let daylight = omsi_sim::Daylight::compute(
             &start_clock(args),
             omsi_content::Envir::load(&args.root.join("envir.cfg"))
                 .ok()
                 .as_ref(),
-        )
-            .brightness
-            < 0.75;
+        );
+        t.night = daylight.brightness < 0.75;
+        t.daylight = Some(daylight);
         t.populate(&world, &renderer, &mut scene, center);
     }
     // OMSI_GROUND_SAMPLE=<csv>: what the wheels stand on every metre along the street lanes
@@ -633,7 +633,14 @@ pub(crate) fn run_offscreen(
                         // (a gate of a manual gearbox comes with the automatic clutch, as
                         // from the keys)
                         player.clutch_for_gate(name);
-                        player.vehicle.trigger(name);
+                        // (the game's door actions, `door_<n>` / `doors_all`, as a button
+                        // pressed and let go)
+                        if crate::player::door_action(name).is_some() {
+                            player.action(name, true);
+                            player.action(name, false);
+                        } else {
+                            player.vehicle.trigger(name);
+                        }
                     }
                 }
                 player.axes.clutch = (player.axes.clutch - 0.7 * dt).max(0.0);
@@ -746,6 +753,7 @@ pub(crate) fn run_offscreen(
                         controls.brake = ((speed - kmh - 3.0) / 10.0).clamp(0.0, 1.0);
                     }
                 }
+                player.tick_auto_shift(dt, controls.throttle, controls.brake);
                 player.auto_clutch_bite(controls.throttle);
                 controls.clutch = controls.clutch.max(player.axes.clutch);
                 player.vehicle.set_controls(controls);
@@ -960,8 +968,10 @@ pub(crate) fn run_offscreen(
                 }
             }
             if let Some(t) = traffic.as_mut() {
-                for (id, secs) in h.take_holds() {
-                    t.hold_boarding(id, secs);
+                let (alighting, waiting) = h.stop_wishes();
+                t.set_stop_wishes(alighting, waiting);
+                for (id, stop, secs) in h.take_holds() {
+                    t.hold_boarding(id, stop, secs);
                 }
                 for (id, entry, exit) in h.take_ai_requests() {
                     t.set_pax_requests(id, &entry, &exit);
@@ -1783,6 +1793,9 @@ pub(crate) fn run_offscreen(
             }
         }
         vehicle_camera(&player, &mut camera);
+        // the driver at the wheel, as the window has him every frame (not posed, he was
+        // not drawn - or stood in the aisle in the file's T-pose)
+        player.sync_driver(&renderer, &mut scene, 1.0 / 30.0, settings.driver, args.view == "driver");
         player_ref = Some(player);
     }
     if let Some(mut h) = humans_off.take() {
@@ -2724,10 +2737,7 @@ pub(crate) fn run_offscreen(
             renderer.render(&mut scene, &view, w, h, &camera, &lighting);
             let drawn = t.elapsed().as_secs_f64();
             let t = Instant::now();
-            let _ = renderer.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
+            let _ = omsi_render::wait_gpu(&renderer.device, None);
             cpu.push(drawn * 1000.0);
             gpu.push(t.elapsed().as_secs_f64() * 1000.0);
             if omsi_cfg::env::var_os("OMSI_BENCH_FRAMES").is_some() {
@@ -2790,6 +2800,20 @@ pub(crate) fn run_offscreen(
     let t0 = Instant::now();
     if let Some(p) = player_ref.as_ref() {
         render_mirrors(&mut renderer, &mut scene, &world, p, &lighting, None, None);
+    }
+    if let Some(p) = player_ref.as_ref() {
+        let mode = omsi_cfg::env::var("OMSI_MIRROR_HUD").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(settings.mirror_hud);
+        let mut panels = crate::mirror_hud::MirrorHud::default();
+        panels.set_aspects(world.mirror_aspect.lock().clone());
+        panels.sync(p, mode);
+        if mode != 0 {
+            panels.enabled = true;
+            if panels.panels.is_empty() {
+                panels.toggle_edit(p);
+                panels.toggle_edit(p);
+            }
+        }
+        panels.push(&mut scene, &world, w as f32, h as f32, (0.0, 0.0));
     }
     let pixels = renderer.render_to_image(&mut scene, w, h, &camera, &lighting)?;
     log::info!(

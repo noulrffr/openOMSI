@@ -14,6 +14,11 @@ use omsi_vehicle::Vehicle;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Scripts often test a stopped bus with `!Velocity_Ground`, so do not expose tiny solver drift.
+fn script_speed(speed_kmh: f32) -> f32 {
+    if speed_kmh.abs() < 0.01 { 0.0 } else { speed_kmh }
+}
+
 /// Built-in variables every road vehicle has (`program/varlist_roadvehicle.txt` + generated).
 pub fn builtin_vars(root: &Path) -> Vec<String> {
     let mut v: Vec<String> =
@@ -813,6 +818,8 @@ pub struct AiFrame {
 }
 
 pub struct VehicleInstance {
+    /// `A_Trans_*` taken over OMSI's frames (see [`OmsiFrames`]).
+    a_trans: OmsiFrames,
     pub ty: Arc<VehicleType>,
     pub state: State,
     pub vm: Vm,
@@ -860,6 +867,11 @@ pub struct VehicleInstance {
     /// Faces the wheels cannot climb stop the vehicle (see `RigidBody::wheel_walls`); the
     /// player's bus follows the setting for collisions with objects.
     pub wheel_walls: bool,
+    /// What the radio plays, cut to what a text display shows (see `show_radio_text`):
+    /// `None` leaves the scripts' own texts alone, an empty text is a radio that is off.
+    pub radio_text: Option<String>,
+    /// The frequency the station is on where the bus is (`94.6 MHz`), where it is known.
+    pub radio_frequency: Option<String>,
     /// Crashes so far and the energy of the latest (J), kept for logs and the HUD.
     pub crashes: u32,
     pub last_impact: f32,
@@ -1111,6 +1123,7 @@ impl VehicleInstance {
             offs.iter().sum::<f32>() / offs.len().max(1) as f32
         };
         VehicleInstance {
+            a_trans: OmsiFrames::default(),
             particles: ParticleSet::new(ty.model.particle_systems(), std::ptr::addr_of!(host) as u64 ^ 0x9e37_79b9),
             light_fade: Vec::new(),
             v_springfactor,
@@ -1153,6 +1166,8 @@ impl VehicleInstance {
             collided: false,
             last_crash: 0.0,
             wheel_walls: true,
+            radio_text: None,
+            radio_frequency: None,
             crashes: 0,
             last_impact: 0.0,
             dirt: 0.0,
@@ -1457,7 +1472,7 @@ impl VehicleInstance {
                 w.suspension += (target - w.suspension) * k;
             }
         }
-        let v = self.physics.velocity_kmh();
+        let v = script_speed(self.physics.velocity_kmh());
         self.put(self.v_velocity, v);
         self.put(self.v_velocity_ground, v);
         let n_wheel = self
@@ -1470,6 +1485,7 @@ impl VehicleInstance {
             .unwrap_or(0.0);
         self.put(self.v_n_wheel, n_wheel);
         let a = self.physics.accel;
+        self.physics.a_trans = a;
         self.put(self.v_accel[0], a.x);
         self.put(self.v_accel[1], a.y);
         self.put(self.v_accel[2], a.z);
@@ -1684,7 +1700,7 @@ impl VehicleInstance {
         self.physics.speed = speed;
         self.physics.steer_deg = rb.steer_deg;
         self.physics.accel = rb.accel_body;
-        let v = speed * 3.6;
+        let v = script_speed(speed * 3.6);
         self.put(self.v_velocity, v);
         self.put(self.v_velocity_ground, v);
         let n_wheel = rb
@@ -1695,9 +1711,17 @@ impl VehicleInstance {
             .map(|w| w.rpm)
             .unwrap_or(0.0);
         self.put(self.v_n_wheel, n_wheel);
-        self.put(self.v_accel[0], rb.accel_body.x);
-        self.put(self.v_accel[1], rb.accel_body.y);
-        self.put(self.v_accel[2], rb.accel_body.z);
+        // `A_Trans_*` as Omsi.exe has them (0x7d5124): the change of the body's velocity
+        // over the frame, turned into the body frame - its acceleration, not what an
+        // accelerometer reads, so 0 standing or cruising. `accel_body` carries gravity's
+        // 9.81 m/s² (the wheels' springs need it), which as `A_Trans_Z` kept checks such
+        // as the NEOMAN ECAS's "|A_Trans_Z| < 3 while driving" from ever passing.
+        // (over OMSI's frames: the rattle scripts take its change from one frame to the next)
+        let a = self.a_trans.push(scripts_acceleration(rb.accel_body, rb.orientation), dt);
+        self.physics.a_trans = a;
+        self.put(self.v_accel[0], a.x);
+        self.put(self.v_accel[1], a.y);
+        self.put(self.v_accel[2], a.z);
         for (ai, axle) in self.v_wheels.clone().iter().enumerate() {
             for (si, w) in axle.iter().enumerate() {
                 if let Some(rw) = rb.wheels.get(ai * 2 + si) {
@@ -1817,19 +1841,13 @@ impl VehicleInstance {
         // spray off a wet road, dust off a dry one
         self.set_engine_var("DirtRate", speed * (1.5e-4 + 6.0e-3 * rain));
         // rain soaks the glass in a few seconds; without it the film dries in about a minute.
-        // Snow does not run down a pane and the cab is warm: the flakes that land on the
-        // glass melt and leave a light haze, nothing like the film a shower leaves, so the
-        // rate is steered towards that haze instead of driving the layer to full strength
-        // (`rain.osc` only ever adds `PrecipRate * Timegap` and clamps at 1 - it never asks
-        // what is falling, which is why the original shows raindrops in a snowstorm).
-        let rate = if self.host.precip_type as i32 == 2 {
-            let film = self.var("Rain_Window_Norm_Wetness").unwrap_or(0.0);
-            (SNOW_ON_GLASS * rain - film) * 0.5
-        } else if rain > 0.0 {
-            rain * 0.25
-        } else {
-            -0.02
-        };
+        // Snow builds the film up the same way: `rain.osc` only ever adds `PrecipRate *
+        // Timegap` and clamps at 1 - it never asks what is falling - so in the original the
+        // glass gets as covered in a snowfall as in a shower and the wipers clear it. (The
+        // film wears snow crystals then, see `rain::snow_on_glass`.) Held to a fifth for a
+        // "haze", the panes stayed clear in the thickest snowfall and the wipers had
+        // nothing to do (#883).
+        let rate = if rain > 0.0 { rain * 0.25 } else { -0.02 };
         self.set_engine_var("PrecipRate", rate);
         // the state of the road, for the tyre sounds and the wheel spray
         self.set_engine_var("StreetCond", self.host.street_cond);
@@ -2019,8 +2037,47 @@ impl VehicleInstance {
         self.update_engine_vars(dt);
         let p = self.ty.program.clone();
         self.vm.run_frame(&p, &mut self.state, &mut self.host);
+        self.show_radio_text();
         self.clear_pax_requests();
         self.update_visuals(dt);
+    }
+
+    /// The station and the song on a radio whose display is a text of its script. OMSI has
+    /// no radio of its own: these radios show names from a list in the script, and a radio
+    /// plugin writes what it really plays into a string of theirs. Two kinds are known:
+    ///
+    /// - a script that reads `Snd_Radio_Text` (the plugin's variable) and puts it behind
+    ///   its frequency: the text goes there;
+    /// - Dmitrij's "Magnitola" (the radio of P3ta's SOR buses and others): the playlist
+    ///   writes `frequency@station` into `mp3_display_track_name` every frame and the
+    ///   display `magnitola_1` shows it - `@` is the line break, ten characters a line.
+    ///   While the display shows that, its second line is replaced.
+    ///
+    /// The frequency in front is the script's too, one of its list. Where the station's
+    /// own is known (`radio_frequency`: a map says which frequency its stations are on,
+    /// and where) that one stands there instead.
+    fn show_radio_text(&mut self) {
+        let Some(text) = self.radio_text.as_ref() else { return };
+        let frequency = self.radio_frequency.as_deref();
+        let p = &self.ty.program;
+        if let Some(i) = p.str_var("Snd_Radio_Text") {
+            if self.state.str_vars[i as usize] != *text {
+                self.state.str_vars[i as usize] = text.clone();
+            }
+            // (this kind keeps its frequency apart, `90.9 MHz@` in `mp3_freq`, and the
+            // display begins with it)
+            if let (Some(frequency), Some(display), Some(own)) = (frequency, p.str_var("magnitola_1"), p.str_var("mp3_freq")) {
+                let own = &self.state.str_vars[own as usize];
+                if let Some(shown) = own_frequency(own, &self.state.str_vars[display as usize], frequency) {
+                    self.state.str_vars[display as usize] = shown;
+                }
+            }
+            return;
+        }
+        let (Some(display), Some(track)) = (p.str_var("magnitola_1"), p.str_var("mp3_display_track_name")) else { return };
+        if let Some(shown) = magnitola_line(&self.state.str_vars[track as usize], &self.state.str_vars[display as usize], text, frequency) {
+            self.state.str_vars[display as usize] = shown;
+        }
     }
 
     /// The passengers' door requests are pulses: Omsi.exe clears all eight of each kind
@@ -2146,6 +2203,7 @@ impl VehicleInstance {
             .unwrap_or(0.0);
         self.put(self.v_n_wheel, n_wheel);
         let a = self.physics.accel;
+        self.physics.a_trans = a;
         self.put(self.v_accel[0], a.x);
         self.put(self.v_accel[1], a.y);
         self.put(self.v_accel[2], a.z);
@@ -2899,10 +2957,6 @@ const SHADOW_STEP_UP: f64 = 0.6;
 /// a road under a bridge - and not the face this wheel stands on.
 const SHADOW_STEP_DOWN: f64 = 3.0;
 
-/// How strong the film on the glass gets in the thickest snowfall (`Rain_Window_*_Wetness`,
-/// 0 … 1): a haze of crystals, not a windscreen running with water.
-const SNOW_ON_GLASS: f32 = 0.22;
-
 fn is_shadow_mesh(ty: &VehicleType, i: usize) -> bool {
     ty.meshes
         .get(i)
@@ -3030,6 +3084,50 @@ pub struct TrailerPart {
     pub text_textures: Vec<crate::texttex::TextTextureState>,
 }
 
+/// OMSI's frames, a thirtieth of a second (`[maxFPS]` 30 in its options.cfg and every option
+/// preset but one): `A_Trans_*` is the body's velocity change over one of them (0x7d5124),
+/// and the stock rattle scripts (`klappern.osc`: `Klappern_Vol` follows how much |A_Trans|
+/// changes from one frame to the next) were tuned on that. Taken over this game's frames -
+/// 60 to 150 a second - the change from frame to frame was a half to a fifth of OMSI's for
+/// the same jolt, and the buses kept quiet on rough roads (#772, #886). The value is the
+/// mean over each thirtieth, held until the next one is complete.
+#[derive(Debug, Clone, Copy, Default)]
+struct OmsiFrames {
+    sum: Vec3,
+    t: f32,
+    out: Vec3,
+}
+
+impl OmsiFrames {
+    const FRAME: f32 = 1.0 / 30.0;
+
+    fn push(&mut self, a: Vec3, dt: f32) -> Vec3 {
+        if !(dt > 0.0) || !a.is_finite() {
+            return self.out;
+        }
+        // (a frame as long as OMSI's or longer is one of OMSI's)
+        if dt >= Self::FRAME * 0.99 {
+            *self = OmsiFrames { out: a, ..Default::default() };
+            return a;
+        }
+        self.sum += a * dt;
+        self.t += dt;
+        if self.t >= Self::FRAME * 0.99 {
+            self.out = self.sum / self.t;
+            self.sum = Vec3::ZERO;
+            self.t = 0.0;
+        }
+        self.out
+    }
+}
+
+/// The body-frame acceleration the scripts see as `A_Trans_*` (Omsi.exe 0x7d5124: the
+/// velocity's change over the frame, rotated into the body): `accel_body`, the specific force
+/// an accelerometer would read, less gravity's share in the body frame.
+fn scripts_acceleration(accel_body: Vec3, orientation: Quat) -> Vec3 {
+    accel_body - orientation.inverse().mul_vec3(Vec3::new(0.0, 0.0, 9.81))
+}
+
 impl TrailerPart {
     /// Pitch (degrees, nose up), eased axle height and the track point it stands on (for
     /// the `OMSI_DEBUG_TRAILERS` trace).
@@ -3090,8 +3188,17 @@ impl TrailerPart {
         } else {
             Vec3::new(0.0, -4.0, 0.3)
         });
-        // the pivot axle: the one farthest from the coupled end
-        let axle_long = if reversed {
+        // the line the part turns about: its own `[rot_pnt_long]` where a road part names
+        // one (Omsi.exe runs every section as a body of its own on the same wheel physics,
+        // each axle steered towards the turning centre on that line), else the axle
+        // farthest from the coupled end. A rear section whose axle steers (the Van Hool
+        // AG300's, set ahead of its axle) followed it as if it were a fixed one (#322);
+        // the stock GN92's line is its axle, a semitrailer's the middle of its axle group,
+        // and rail cars name none.
+        let turning_line = (ty.def.rot_pnt_long != 0.0 && !ty.def.axles.is_empty()).then_some(ty.def.rot_pnt_long);
+        let axle_long = if let Some(r) = turning_line {
+            r
+        } else if reversed {
             let a = ty.def.axles.iter().map(|a| a.long).fold(f32::MIN, f32::max);
             if a == f32::MIN {
                 0.5
@@ -3389,26 +3496,33 @@ impl TrailerPart {
             .track
             .filter(|t| (t.truncate() - new_pivot.truncate()).length() < 1.0)
             .map(|t| t.z);
+        // the height of the part's origin over its axle (where the ground has none: level
+        // with the coupling, as before)
+        let level = c.z - self.coupling_front.z as f64;
         // the ground under its axle: what the wheels stand on where the world says, else the
         // plain height sampler
         let ground_z = match (on_track, &main.contact, &main.ground) {
             (Some(_), _, _) => None,
-            (None, Some(c), _) => {
-                c.probe(new_pivot.x, new_pivot.y, self.position.z + 1.5)
-                    .below
+            (None, Some(g), _) => {
+                // Looked for from above the coupling's level as well as from the part's own
+                // height: from its own height alone, a rear section that had once dropped
+                // under a viaduct's deck (a frame's step at the ramp, a gap at a joint) only
+                // ever found the ground beneath and hung there under the bridge while the
+                // front section drove on above (#135).
+                let top = self.position.z.max(level) + 1.5;
+                g.probe(new_pivot.x, new_pivot.y, top).below
             }
             (None, None, Some(g)) => g(new_pivot.x, new_pivot.y),
             _ => None,
         };
-        // the height of the part's origin over its axle (where the ground has none: level
-        // with the coupling, as before)
         // A height far from where the coupling holds the part is another level's: the AI's
         // ground lookup knows only x and y and gives the highest road there, which under a
         // bridge is the deck (or, on the deck, a road that runs on beneath it) - the trailer
         // of a lorry and the rear of an articulated bus stood up on the bridge or down under
-        // it (#140). Level with the coupling instead.
-        let level = c.z - self.coupling_front.z as f64;
-        let ground_z = ground_z.filter(|z| main.contact.is_some() || (z + lift - level).abs() < 1.5);
+        // it (#140). Level with the coupling instead. With the world's faces the part may
+        // stand lower than the coupling on a grade, but never metres under it: that is the
+        // road under a bridge seen through a gap in the deck (#135).
+        let ground_z = ground_z.filter(|z| if main.contact.is_some() { z + lift - level > -3.0 } else { (z + lift - level).abs() < 1.5 });
         let axle_z = match on_track.or(ground_z.map(|z| z + lift)) {
             Some(z) if on_track.is_some() => z,
             Some(z) if main.contact.is_some() && dt > 0.0 => {
@@ -3455,6 +3569,15 @@ impl TrailerPart {
         // the trailer origin: coupling_front sits at c
         let rot = self.body_rotation();
         self.position = c - rot.transform_point3(self.coupling_front).as_dvec3();
+        // The wheels stand on the road under them, wherever the body above swings: the
+        // travel of each wheel is the gap between its hub on the body and the ground under
+        // it (Omsi.exe runs the section as a body on its own springs, each wheel's travel
+        // its own). Held at the static sag, the rear axle of an articulated bus was a rigid
+        // one - its wheels bounced and leant with the body over every bump and in every
+        // bend (#901).
+        if !ai && on_track.is_none() && dt > 0.0 && shows {
+            self.spring_wheels(main, rot);
+        }
         // The joint's angles (degrees) for its plates and bellows and for the scripts: alpha
         // about the vertical axis - the stock articulation.osc's jackknife protection brakes
         // at |alpha| > 47° - and beta about the transverse axis. (The horizontal angle went
@@ -3531,6 +3654,48 @@ impl TrailerPart {
         self.props_plan
             .apply(&main.state.vars, &mut self.mesh_props);
         let _ = self.axle_long;
+    }
+}
+
+impl TrailerPart {
+    /// `Axle_Suspension_*` of the part's sprung axles from the ground under each wheel, the
+    /// body standing at `self.position` turned by `rot` (see `update`).
+    fn spring_wheels(&self, main: &mut VehicleInstance, rot: Mat4) {
+        let probe = |x: f64, y: f64, top: f64| -> Option<f64> {
+            match (&main.contact, &main.ground) {
+                (Some(g), _) => g.probe(x, y, top).below,
+                (None, Some(g)) => g(x, y),
+                _ => None,
+            }
+        };
+        let mut travel: Vec<(usize, [Option<f32>; 2])> = Vec::new();
+        for (a, (offset, _, _)) in self.rest.iter().enumerate() {
+            let axle = self.first_axle + a;
+            if !self.ty.suspension_axles.contains(&axle) {
+                continue;
+            }
+            let Some(def) = self.ty.def.axles.get(a) else { continue };
+            let r = (def.wheel_diameter / 2.0).max(0.15);
+            let hub = r - offset;
+            let outer = (def.max_width / 2.0).max(0.3);
+            let across = if def.min_width > 0.0 && def.min_width < def.max_width { (def.max_width + def.min_width) / 4.0 } else { outer * 0.85 };
+            let mut sides = [None, None];
+            for (si, x) in [-across, across].into_iter().enumerate() {
+                let p = self.position + rot.transform_point3(Vec3::new(x, def.long, hub)).as_dvec3();
+                let Some(g) = probe(p.x, p.y, p.z + 1.0) else { continue };
+                // how far the wheel is pushed up into its arch (never below where it hangs
+                // unloaded, never past the bump stop)
+                sides[si] = Some(((g + r as f64 - p.z) as f32).clamp(0.0, crate::rigid::BUMP));
+            }
+            travel.push((axle, sides));
+        }
+        for (axle, sides) in travel {
+            for (side, c) in ["L", "R"].into_iter().zip(sides) {
+                if let (Some(c), Some(id)) = (c, main.ty.program.var(&format!("Axle_Suspension_{axle}_{side}"))) {
+                    main.state.vars[id as usize] = -c;
+                }
+            }
+        }
     }
 }
 
@@ -3738,6 +3903,13 @@ pub fn skin_vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_speed_reports_tiny_resting_motion_as_stopped() {
+        assert_eq!(script_speed(0.000251), 0.0);
+        assert_eq!(script_speed(-0.000251), 0.0);
+        assert_eq!(script_speed(0.02), 0.02);
+    }
 
     /// A shadow blob at the model's z = 0 is laid onto the plane through the wheels: 15 cm
     /// up with the body sagging, and following a pitch; one axle gives a level plane.
@@ -4060,6 +4232,150 @@ mod tests {
         }
     }
 
+    /// The stock rattle (`klappern.osc`) as loud at 144 frames a second as at OMSI's 30.
+    #[test]
+    fn a_jolt_rattles_alike_at_any_frame_rate() {
+        fn rattle(fps: f32) -> f32 {
+            let dt = 1.0 / fps;
+            let (mut frames, mut last, mut vol, mut peak) = (super::OmsiFrames::default(), 0.0f32, 0.0f32, 0.0f32);
+            for i in 0..(fps as usize) {
+                let t = i as f32 * dt;
+                // a 6 Hz pitching after a bump, 0.5 m/s² along the bus
+                let a = Vec3::new(0.0, 0.5 * (t * 6.0 * std::f32::consts::TAU).sin() * (-t * 3.0).exp(), 0.0);
+                let a = frames.push(a, dt);
+                let m = (a.x * a.x + a.y * a.y + 0.01 * a.z * a.z).sqrt();
+                vol = ((m - last) * 1.0).max(vol * (-dt).exp()).min(1.0);
+                last = m;
+                peak = peak.max(vol);
+            }
+            peak
+        }
+        let (omsi, fast) = (rattle(30.0), rattle(144.0));
+        // (taken frame by frame, 144 a second rattled at 0.3 of OMSI's)
+        assert!(omsi > 0.2 && omsi < 0.9, "{omsi}");
+        assert!(fast > 0.6 * omsi && fast < 1.4 * omsi, "30 fps {omsi}, 144 fps {fast}");
+    }
+
+    /// `A_Trans_*` are the body's acceleration without gravity, as in Omsi.exe: 0 for a bus
+    /// standing still, on the level or on a grade, and the braking's deceleration alone.
+    #[test]
+    fn scripts_acceleration_leaves_gravity_out() {
+        let level = super::scripts_acceleration(Vec3::new(0.0, 0.0, 9.81), Quat::IDENTITY);
+        assert!(level.length() < 1e-4, "{level}");
+        // standing nose up on a 10 % grade: the accelerometer reads gravity's share along it
+        let rot = Quat::from_rotation_x(0.1f32.atan());
+        let reading = rot.inverse().mul_vec3(Vec3::new(0.0, 0.0, 9.81));
+        let grade = super::scripts_acceleration(reading, rot);
+        assert!(grade.length() < 1e-4, "{grade}");
+        // braking at 3 m/s² on the level
+        let braking = super::scripts_acceleration(Vec3::new(0.0, -3.0, 9.81), Quat::IDENTITY);
+        assert!((braking - Vec3::new(0.0, -3.0, 0.0)).length() < 1e-4, "{braking}");
+    }
+
+    /// A rear section turns about its own `[rot_pnt_long]` line: the stock GN92's is its
+    /// axle; one set ahead of the axle (a steered rear axle, #322) is where it turns.
+    #[test]
+    fn rear_section_turns_about_its_rot_pnt_long() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/MAN_NL_NG/MAN_GN92_main.bus");
+        let trail = root.join("Vehicles/MAN_NL_NG/MAN_GN92_trail.bus");
+        if !bus.exists() || !trail.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("GN92"));
+        let mut tt = VehicleType::load(&root, &trail).expect("GN92 trail");
+        let stock = TrailerPart::new(Arc::new(VehicleType::load(&root, &trail).unwrap()), &ty, &ty.program, 2);
+        assert!((stock.pivot_length() - (4.169 + 0.387)).abs() < 1e-3, "{}", stock.pivot_length());
+        tt.def.rot_pnt_long = 1.0;
+        let steered = TrailerPart::new(Arc::new(tt), &ty, &ty.program, 2);
+        assert!((steered.pivot_length() - (4.169 - 1.0)).abs() < 1e-3, "{}", steered.pivot_length());
+    }
+
+    /// The rear section of an articulated bus on a viaduct stays on the deck: one frame with
+    /// no deck under its axle (a gap at a joint) does not drop it onto the road below, and
+    /// one that had sunk under the deck finds it again (#135).
+    #[test]
+    fn rear_section_stays_on_a_viaduct_deck() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/MAN_NL_NG/MAN_GN92_main.bus");
+        let trail = root.join("Vehicles/MAN_NL_NG/MAN_GN92_trail.bus");
+        if !bus.exists() || !trail.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("GN92"));
+        let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+        v.attach_trailer_ex(Arc::new(VehicleType::load(&root, &trail).expect("GN92 trail")), false);
+        // 0: a deck at 10 m over a road at 0; 1: a gap in the deck
+        let mode = Arc::new(AtomicU8::new(0));
+        let m = mode.clone();
+        let ground = move |_x: f64, _y: f64, top: f64| {
+            let deck = m.load(Ordering::Relaxed) == 0;
+            if deck && top >= 10.0 {
+                crate::rigid::GroundProbe { below: Some(10.0), above: None }
+            } else if deck {
+                crate::rigid::GroundProbe { below: Some(0.0), above: Some(10.0) }
+            } else {
+                crate::rigid::GroundProbe { below: Some(0.0), above: None }
+            }
+        };
+        v.contact = Some(Arc::new(ground));
+        v.position = DVec3::new(0.0, 0.0, 10.0);
+        for _ in 0..50 {
+            v.update_visuals(0.02);
+        }
+        let on_deck = v.trailers[0].position.z;
+        assert!((on_deck - 10.0).abs() < 0.5, "rear section at {on_deck}");
+        mode.store(1, Ordering::Relaxed);
+        v.update_visuals(0.02);
+        assert!(v.trailers[0].position.z > 9.0, "dropped through the gap to {}", v.trailers[0].position.z);
+        // sunk under the deck: it comes back up
+        mode.store(0, Ordering::Relaxed);
+        v.trailers[0].position.z = 0.2;
+        v.trailers[0].axle_z = Some(0.0);
+        for _ in 0..5 {
+            v.update_visuals(0.02);
+        }
+        assert!(v.trailers[0].position.z > 9.0, "stayed under the deck at {}", v.trailers[0].position.z);
+    }
+
+    /// #901: the rear section's wheels take the road under them - a kerb-high step under
+    /// its left wheel pushes that wheel up into its arch and leaves the right one.
+    #[test]
+    fn rear_section_wheels_spring_on_their_own() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/MAN_NL_NG/MAN_GN92_main.bus");
+        let trail = root.join("Vehicles/MAN_NL_NG/MAN_GN92_trail.bus");
+        if !bus.exists() || !trail.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("GN92"));
+        let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+        v.attach_trailer_ex(Arc::new(VehicleType::load(&root, &trail).expect("GN92 trail")), false);
+        let t = &v.trailers[0];
+        let axle = t.first_axle;
+        assert!(t.ty.suspension_axles.contains(&axle), "the GN92's rear axle is drawn sprung");
+        // a step 6 cm high under the left wheels behind the joint
+        let ground = move |x: f64, y: f64, _top: f64| crate::rigid::GroundProbe { below: Some(if x < 0.0 && y < -4.0 { 0.06 } else { 0.0 }), above: None };
+        v.contact = Some(Arc::new(ground));
+        v.position = DVec3::new(0.0, 0.0, 0.0);
+        for _ in 0..50 {
+            v.update_visuals(0.02);
+        }
+        let l = -v.var(&format!("Axle_Suspension_{axle}_L")).unwrap();
+        let r = -v.var(&format!("Axle_Suspension_{axle}_R")).unwrap();
+        assert!(l - r > 0.04, "left wheel up {l:.3}, right {r:.3}");
+    }
+
     /// A timetable duty and a random traffic car load their bus with `VehicleType::load_ai`,
     /// which lets the vertices of every mesh go to save memory - except a `[smoothskin]`
     /// mesh (the bellows) has to keep its own, or there is nothing left to bend it from and
@@ -4232,6 +4548,57 @@ pub fn relative_humidity(t: f32, abs_hum: f32) -> f32 {
         (abs_hum / sat).max(0.0)
     } else {
         0.0
+    }
+}
+
+/// The "Magnitola" radio's display with `text` as its second line: `track` is what the
+/// playlist wrote (`90.9 MHz@R-ZURNAL`), `shown` what the display holds. None while the
+/// display shows something else (its welcome, the volume), while the radio is stopped (no
+/// station behind the `@`) or off (`text` empty). `own` is the frequency the station is
+/// really on, where that is known: it stands for the script's.
+fn magnitola_line(track: &str, shown: &str, text: &str, own: Option<&str>) -> Option<String> {
+    if text.is_empty() || shown != track {
+        return None;
+    }
+    let (frequency, station) = track.split_once('@')?;
+    (!station.trim().is_empty()).then(|| format!("{}@{text}", own.unwrap_or(frequency)))
+}
+
+/// A display that begins with the script's frequency (`script`: `90.9 MHz@`), with the
+/// station's own in its place. None while it shows something else, and for the script's
+/// `STOPPED@`, which is no frequency.
+fn own_frequency(script: &str, shown: &str, own: &str) -> Option<String> {
+    if !script.ends_with('@') || !script.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let rest = shown.strip_prefix(script)?;
+    Some(format!("{own}@{rest}"))
+}
+
+#[cfg(test)]
+mod radio_text_tests {
+    use super::{magnitola_line, own_frequency};
+
+    #[test]
+    fn the_station_line_is_replaced_while_the_display_shows_it() {
+        assert_eq!(magnitola_line("90.9 MHz@R-ZURNAL", "90.9 MHz@R-ZURNAL", "Radio 1   ", None).as_deref(), Some("90.9 MHz@Radio 1   "));
+        // its welcome and the volume are the display's own
+        assert_eq!(magnitola_line("90.9 MHz@R-ZURNAL", " WELCOME  ", "Radio 1", None), None);
+        assert_eq!(magnitola_line("90.9 MHz@R-ZURNAL", "VOLUME@ 15", "Radio 1", None), None);
+        // stopped, and a radio that plays nothing
+        assert_eq!(magnitola_line("STOPPED@", "STOPPED@", "Radio 1", None), None);
+        assert_eq!(magnitola_line("90.9 MHz@R-ZURNAL", "90.9 MHz@R-ZURNAL", "", None), None);
+    }
+
+    #[test]
+    fn the_stations_own_frequency_stands_for_the_scripts() {
+        assert_eq!(magnitola_line("90.9 MHz@R-ZURNAL", "90.9 MHz@R-ZURNAL", "Radio 1   ", Some("94.6 MHz")).as_deref(), Some("94.6 MHz@Radio 1   "));
+        assert_eq!(magnitola_line("STOPPED@", "STOPPED@", "Radio 1", Some("94.6 MHz")), None);
+        // the kind that keeps its frequency apart
+        assert_eq!(own_frequency("90.9 MHz@", "90.9 MHz@Radio 1   ", "94.6 MHz").as_deref(), Some("94.6 MHz@Radio 1   "));
+        assert_eq!(own_frequency("90.9 MHz@", "94.6 MHz@Radio 1   ", "94.6 MHz"), None);
+        assert_eq!(own_frequency("90.9 MHz@", " WELCOME  ", "94.6 MHz"), None);
+        assert_eq!(own_frequency("STOPPED@", "STOPPED@", "94.6 MHz"), None);
     }
 }
 

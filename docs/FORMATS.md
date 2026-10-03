@@ -280,9 +280,10 @@ saved in a neighbouring tile's file with coordinates beyond the edge. `tile.map.
 The plate is one flat object a couple of hundred metres across, placed at an absolute
 height; the named mesh is a coarse version of the same plate. Every vertex of the object is
 moved by the difference between the ground under it and that base mesh, so the plate keeps
-its kerbs and camber while its arms come down onto the roads that run into them. The ground
-under the plate is then pressed into the base mesh as well, which is what closes the seam
-along its edges.
+its kerbs and camber while its arms come down onto the roads that run into them, and the
+plate's paths take their heights from it (Omsi.exe 0x7ba818). The ground is not pressed into
+it at load: nothing in Omsi.exe reads that mesh for the terrain, and objects stand on the
+`.terrain` heights.
 
 `[spline_terrain_align]` (no parameter) and `[spline_terrain_align_2] <n>` follow a
 `[spline]` in a tile file (Berlin-Spandau: 33 and 203 of 2486 splines). The editor's
@@ -681,6 +682,26 @@ Procity show their own station names for it) with `SndVol_Radio` - the volume kn
 the Sprinter's goes to 2) and `SndExt_RadioPlaylist` for its USB/CD modes. openOMSI
 plays internet stations for them (`~/.openomsi/radio.cfg`). Streams in HE-AAC with a
 program config element (some `.aacp` stations) are not decoded; MP3, AAC-LC and Ogg are.
+
+A radio whose display is a text of its script gets the station and the song that play,
+ten characters a line, a longer text running through: into `Snd_Radio_Text` where the
+script has that variable, and into the second line of `magnitola_1` (`frequency@station`,
+`@` the line break) on Dmitrij's "Magnitola" radio, while it shows its track
+(`mp3_display_track_name`).
+
+A map may bring stations of its own: a `radio.cfg` beside its `global.cfg` (not an OMSI
+file; Omsi.exe does not read it), a line `name = address` each. They come first, on the
+first station buttons, and the player's follow. Its `volume` line is not read. Behind the
+address the frequencies the station is on may stand, for the display: `| 94.6` is its
+frequency everywhere, `| 94.6 @ x, y` the one near that place of the map, in the game's
+metres (tile column and row times 300 m plus the place within the tile; the log gives a
+bus's place when it is put on the map). The frequency of the place nearest to the bus is
+shown:
+
+```
+Radiozurnal = https://example.org/radiozurnal.mp3 | 94.6 @ 25500, 20000 | 90.9 @ 2300, -720
+Regional = https://example.org/regional.mp3 | 97.9
+```
 
 ## Textures on the GPU - unit `mc_texMan`
 

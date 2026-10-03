@@ -87,6 +87,10 @@ pub struct TripTimes {
     pub stations: Vec<(f64, f64)>,
     /// Whether the bus stops at the station.
     pub stops: Vec<bool>,
+    /// `[profile_otherstopping]` per station (0 when not given): 1 and 4 stop whoever
+    /// wants to get on or off, 2 is passed, 3 is served when the bus would be more than 20 s
+    /// early (Omsi.exe 0x7da6f0 .. 0x7da8bf; see `bus_service::BusService::must_serve`).
+    pub kinds: Vec<u8>,
     /// Seconds from the departure to the arrival at the last station.
     pub duration: f64,
 }
@@ -105,6 +109,7 @@ impl TripTimes {
         let mut arr: Vec<Option<f64>> = vec![None; n];
         let mut dep: Vec<Option<f64>> = vec![None; n];
         let mut stops = vec![true; n];
+        let mut kinds = vec![0u8; n];
         if let Some(p) = profile {
             let at = |i: i32| usize::try_from(i).ok().filter(|i| *i < n);
             for (i, m) in &p.man_arr_time {
@@ -118,8 +123,11 @@ impl TripTimes {
                 }
             }
             for (i, v) in &p.other_stopping {
-                if let (Some(i), 2) = (at(*i), *v) {
-                    stops[i] = false;
+                if let Some(i) = at(*i) {
+                    kinds[i] = (*v).clamp(0, 255) as u8;
+                    if *v == 2 {
+                        stops[i] = false;
+                    }
                 }
             }
         }
@@ -181,6 +189,7 @@ impl TripTimes {
         TripTimes {
             stations: out,
             stops,
+            kinds,
             duration: duration.max(1.0),
         }
     }
@@ -1241,6 +1250,17 @@ impl Schedule {
     }
 
     /// When departure `i`'s bus is at its trip's stations.
+    /// The stations departure `i` serves whoever wants them or not (`[profile_otherstopping]`
+    /// 1 or 4), and those it serves when it would be early (3), by object id.
+    fn special_stops(&self, i: usize) -> (Vec<i64>, Vec<i64>) {
+        let stations = trip_stations(&self.data.trips[self.departures[i].trip]);
+        let kinds = &self.times_of(i).kinds;
+        let of = |want: &[u8]| -> Vec<i64> {
+            stations.iter().zip(kinds).filter(|(_, k)| want.contains(k)).map(|(id, _)| *id).collect()
+        };
+        (of(&[1, 4]), of(&[3]))
+    }
+
     fn times_of(&self, i: usize) -> &TripTimes {
         let d = &self.departures[i];
         &self.times[d.trip][d.profile]
@@ -1440,6 +1460,7 @@ impl Schedule {
             .iter()
             .map(|(t, s)| (t.def.path.clone(), *s))
             .chain(self.fleet_reading.keys().cloned())
+            .chain(traffic.random_sets().into_iter().map(|(t, s)| (t.def.path.clone(), s)))
             .collect();
         // (OMSI_FLEET_IDLE=<s> shortens the wait, for tests)
         let idle = omsi_cfg::env::var("OMSI_FLEET_IDLE")
@@ -2257,6 +2278,8 @@ impl Schedule {
             let line = self.display_line(i);
             let terminus = self.data.trips[self.departures[i].trip].terminus.clone();
             let names = self.trip_stop_names(self.departures[i].trip);
+            let last_stop = trip_stations(&self.data.trips[self.departures[i].trip]).last().copied();
+            let (always, early) = self.special_stops(i);
             let car = &mut traffic.cars[ci];
             if let Some(k) = car.vehicle.ty.program.str_var("Linie") {
                 car.vehicle.state.str_vars[k as usize] = line.clone();
@@ -2267,6 +2290,9 @@ impl Schedule {
             if let Some(b) = car.bus.as_mut() {
                 b.route_open = end < slots.len();
                 b.terminus = terminus.clone();
+                b.last_stop = last_stop;
+                b.always = always;
+                b.serve_early = early;
             }
             let id = car.id;
             self.car_departure.insert(id, i);
@@ -2447,6 +2473,8 @@ impl Schedule {
         }
         let names = self.trip_stop_names(self.departures[i].trip);
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let last_stop = trip_stations(&self.data.trips[self.departures[i].trip]).last().copied();
+        let (always, early) = self.special_stops(i);
         let car = &mut traffic.cars[ci];
         // on its layover only when it stands at its first stop now (the trip's first station
         // may lie on a part of the track that is not loaded): it waits there for its departure
@@ -2455,6 +2483,9 @@ impl Schedule {
                 && b.stops.front().map(|st| st.ri == 0 && (st.s - s).abs() < 2.0).unwrap_or(false);
             b.route_open = end < slots.len();
             b.terminus = terminus.clone();
+            b.last_stop = last_stop;
+            b.always = always;
+            b.serve_early = early;
         }
         // the bus scripts read the line/terminus for their displays
         if let Some(i) = ty.program.str_var("Linie") {
@@ -2925,10 +2956,13 @@ fn line_code_from_text(line: &str, route_code: Option<u32>) -> Option<u32> {
     if let (Some(_), Some(code)) = (line_prefix(line), route_code) {
         return Some(code / 100 * 100 + line_suffix_from_text(line));
     }
+    // (four and five digit lines too: the IBIS takes line x 100 + suffix whatever the
+    // line's length, and a São Paulo 7110 fell back to its route code, whose last two
+    // digits - the route, not a suffix - came out on the display as a letter, #459)
     match line_number_digits(line)
         .parse::<u32>()
         .ok()
-        .filter(|n| *n > 0 && *n < 1000)
+        .filter(|n| *n > 0 && *n < 100_000)
     {
         Some(number) => Some(number * 100 + line_suffix_from_text(line)),
         None => route_code,
@@ -4106,6 +4140,10 @@ impl PlayerDuty {
         &self.trips[self.trip_index]
     }
 
+    pub fn trip_done(&self) -> bool {
+        self.done
+    }
+
     /// Service/depot legs have no public line and use the HOF's
     /// `Betriebsfahrt` destination. They remain part of the duty, but the
     /// player's IBIS should use the next public leg while the bus is waiting.
@@ -4547,6 +4585,16 @@ mod tests {
         assert_eq!(line_suffix_from_text("5S"), 23);
         assert_eq!(line_code_from_text("5E", Some(505)), Some(510));
         assert_eq!(line_code_from_text("5", Some(505)), Some(500));
+    }
+
+    /// #459: a four-digit line keeps its number and gets no suffix from its route code.
+    #[test]
+    fn four_digit_line_keeps_its_number() {
+        assert_eq!(line_code_from_text("7110", Some(711001)), Some(711000));
+        assert_eq!(line_code_from_text("7110", None), Some(711000));
+        assert_eq!(line_code_from_text("7110-10", Some(711010)), Some(711000));
+        assert_eq!(line_code_from_text("1234E", None), Some(123410));
+        assert_eq!(complex_line_text("7110", 7110.0), "7110  ");
     }
 
     /// #546: a letter-first line had no number, and the DL05's matrix blanks line 0.

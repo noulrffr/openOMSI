@@ -152,9 +152,13 @@ fn weather_outside_n(world: vec3<f32>, n: vec3<f32>, terrain: bool, surface: f32
     }
     // a vehicle's part (lib.rs `Instance::roof`): under its roof it is dry, whichever
     // vehicle it is - the one the camera is in, another player's, a timetable bus
+    // (what faces up only: taken for every face below the roof, the whole outer skin of
+    // every car and bus below the roof's edge was cab - lit by the dim cab light in the
+    // enhanced picture, dry in the rain - with a hard seam round the body 0.3 m under the
+    // roof where the sky's light began, #805)
     if (surface < -500.0) {
         let roof = -surface - 5000.0;
-        if (world.z < roof - 0.3) {
+        if (world.z < roof - 0.3 && n.z > 0.5) {
             return 0.0;
         }
     }
@@ -1524,11 +1528,11 @@ fn fs_main(in: FsIn) -> @location(0) vec4<f32> {
     // at 2 of 255 instead of 8.)
     let classic = camera.sky_color.w > 0.5;
     // (the terrain's night map is its tile light map: light, not a glow - see below)
-    let terrain_night = classic
-        && material.params.y < 0.5
+    let terrain_map = material.params.y < 0.5
         && material.extra.x > 0.5
         && material.extra.w > 0.5
         && material.extra.w < 1.5;
+    let terrain_night = classic && terrain_map;
     if (classic && material.params.y < 0.5) {
         var v = clamp(material.emissive.rgb + mat_light + material.color.rgb * interior_lamps(in.world, n, in.params2.z), vec3<f32>(0.0), vec3<f32>(1.0));
         if (light_mapped) {
@@ -1543,6 +1547,15 @@ fn fs_main(in: FsIn) -> @location(0) vec4<f32> {
             // sand where OMSI 2 shows it dark grey.
             let nm = srgb_encode(sample_nightmap(vec2<f32>(in.uv.x, 1.0 - in.uv.y)).rgb);
             v = min(v + nm * camera.sun_color.w * clamp(in.params2.y, 0.0, 1.0), vec3<f32>(1.0));
+        }
+        if (lm_only) {
+            // a road, a plate or a [LightMapMapping] object: the same tile light map, the
+            // same way as the ground beside it (Omsi.exe lights both from it alone - its
+            // `[maplight]`s only bake the map, 0x7903e0). Added after the texture in linear
+            // light instead, the pools that lay bright on the verges hardly showed on the
+            // asphalt between them: the street lamps lit everything but the road (#847).
+            let lm = srgb_encode(light_map_at(in.world));
+            v = min(v + lm * camera.sun_color.w, vec3<f32>(1.0));
         }
         lit = srgb_decode(srgb_encode(albedo) * v);
     } else if (light_mapped) {
@@ -1568,19 +1581,13 @@ fn fs_main(in: FsIn) -> @location(0) vec4<f32> {
     if ((!light_mapped && !classic) || material.params.y > 0.5) {
         lit = lit + tex.rgb * material.emissive.rgb;
     }
-    // the tile light map, as on the terrain: the lamps' pools on the roads and the plates,
-    // lighting the surface (not painted over it: added as it was, the pool lay on the road
-    // as a white patch); only where it is their light at night - elsewhere the map's lamps
-    // light them as they light the squares and pavements beside them
-    if (lm_only) {
-        lit = lit + albedo * material.color.rgb * light_map_at(in.world) * camera.sun_color.w;
-    }
     // [interiorlight]: the saloon lamps on the meshes and passengers they illuminate (in
     // a light-mapped material's vertex light already, above)
     if (!light_mapped && !classic) {
         lit = lit + tex.rgb * interior_lamps(in.world, n, in.params2.z);
     }
-    if (material.extra.w > 0.5 && !terrain_night) {
+    // (Vanilla+: the map's lamps light the ground, as they light the roads)
+    if (material.extra.w > 0.5 && !terrain_map) {
         // [matl_nightmap]: self-illumination that fades in with the night
         // terrain: the tile light map in tile space (north at the top row)
         let nuv = select(buv, vec2<f32>(in.uv.x, 1.0 - in.uv.y), material.extra.x > 0.5);
@@ -1673,7 +1680,10 @@ fn fs_main(in: FsIn) -> @location(0) vec4<f32> {
     // snow: the ground, the roads and every upward-facing surface whiten under it
     // (not on a shadow blob: whitened, it lit the snow under the bus instead of shading it)
     // (not in vanilla: OMSI 2 shows snow only through the season's WinterSnow textures)
-    let snow = camera.ambient.w * outside * select(1.0, 0.0, in.params2.w > 1.5 || camera.sky_color.w > 0.5);
+    // (nor on a texture that is the season's snow picture: the map's own WinterSnow
+    // textures show the snow as OMSI 2 does, and whitened over, the snowy grass and the
+    // grey road went one flat white, the lane markings left standing in it, #879)
+    let snow = camera.ambient.w * outside * select(1.0, 0.0, in.params2.w > 1.5 || camera.sky_color.w > 0.5 || material.ambient.w > 0.5);
     if (snow > 0.0) {
         let up = clamp(n.z, 0.0, 1.0);
         let ground = select(0.0, 1.0, material.extra.x > 0.5 || material.params2.z > 0.0);
